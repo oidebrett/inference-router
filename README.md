@@ -7,7 +7,7 @@ this router as a NemoClaw "custom" provider.
 
 ```
 sandbox → inference.local → OpenShell gateway → pii-router (127.0.0.1:4100/v1, model "pii-router")
-                                                  ├─ PII     → Ollama  (OLLAMA_MODEL, e.g. qwen3:4b)
+                                                  ├─ PII     → Ollama  (OLLAMA_MODEL, e.g. qwen3.5:4b)
                                                   └─ not PII → NVIDIA  (NVIDIA_MODEL)
 ```
 
@@ -40,7 +40,7 @@ The bare question "does this contain PII?" caught only 3/12 — the wording in
 ## Install (on the gateway host)
 
 ```bash
-sudo OLLAMA_MODEL=qwen3:4b NVIDIA_API_KEY=nvapi-... scripts/pii-router/install.sh
+sudo OLLAMA_MODEL=qwen3.5:4b NVIDIA_API_KEY=nvapi-... scripts/pii-router/install.sh
 ```
 
 Idempotent; re-run to upgrade. Generated secrets (`LITELLM_MASTER_KEY`, `LAYA_API_KEY`)

@@ -2,7 +2,7 @@
 # Wire the PII router into an agent-gateway host (called by manidae-cloud when
 # "Use Ollama only for PII requests" is ticked). Idempotent.
 #
-#   sudo OLLAMA_MODEL=qwen3:4b NVIDIA_API_KEY=nvapi-... scripts/pii-router/agentgateway-setup.sh
+#   sudo OLLAMA_MODEL=qwen3.5:4b NVIDIA_API_KEY=nvapi-... scripts/pii-router/agentgateway-setup.sh
 #
 # 1. Installs the router (install.sh), bound to the Docker bridge IP: sandbox
 #    containers and the host reach it, the internet does not — even on hosts

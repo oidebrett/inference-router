@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Install / upgrade the PII router on an agent-gateway host (idempotent).
 #
-#   sudo OLLAMA_MODEL=qwen3:4b NVIDIA_API_KEY=nvapi-... ./install.sh
+#   sudo OLLAMA_MODEL=qwen3.5:4b NVIDIA_API_KEY=nvapi-... ./install.sh
 #
-# Required: OLLAMA_MODEL (local model for PII requests; must support tool calling),
+# Required: OLLAMA_MODEL (local model for PII requests, e.g. qwen3.5:0.8b on 8 GB, qwen3.5:4b on 16 GB; must support tool calling),
 #           NVIDIA_API_KEY (cloud backend for everything else).
 # Optional: NVIDIA_MODEL (default nvidia/nemotron-3-ultra-550b-a55b), OLLAMA_BASE_URL
 #           (default http://127.0.0.1:11434), PII_ROUTER_HOST (127.0.0.1), PII_ROUTER_PORT (4100),
