@@ -28,13 +28,27 @@ die() { printf '[pii-router] ERROR: %s\n' "$*" >&2; exit 1; }
 [ -n "${NVIDIA_API_KEY:-}" ] || die "NVIDIA_API_KEY is required"
 PYTHON="${PYTHON:-python3}"
 "$PYTHON" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' || die "Python 3.10+ required"
-"$PYTHON" -m venv --help >/dev/null 2>&1 || die "python3-venv is not installed"
+# `python3 -m venv --help` succeeds even without ensurepip, but creating a venv
+# then fails ("ensurepip is not available") — Ubuntu 24.04's cloud image ships
+# python3 without python3-venv (seen on the first live install, 2026-10-04).
+if ! "$PYTHON" -c 'import ensurepip' >/dev/null 2>&1; then
+  if command -v apt-get >/dev/null 2>&1; then
+    log "installing python3-venv"
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -q python3-venv >/dev/null
+  fi
+  "$PYTHON" -c 'import ensurepip' >/dev/null 2>&1 || die "python3-venv (ensurepip) is not installed"
+fi
 
 id pii-router >/dev/null 2>&1 || useradd --system --home-dir "$STATE" --shell /usr/sbin/nologin pii-router
 install -d -m 0755 "$PREFIX"
 install -d -m 0750 -o pii-router -g pii-router "$STATE" "$STATE/hf"
 install -d -m 0750 -o root -g pii-router "$ETC"
 
+# A failed earlier run can leave a venv without pip; rebuild it rather than reuse it.
+if [ -x "$PREFIX/venv/bin/python" ] && ! "$PREFIX/venv/bin/python" -m pip --version >/dev/null 2>&1; then
+  log "removing incomplete virtualenv"
+  rm -rf "$PREFIX/venv"
+fi
 if [ ! -x "$PREFIX/venv/bin/python" ]; then
   log "creating virtualenv"
   "$PYTHON" -m venv "$PREFIX/venv"
