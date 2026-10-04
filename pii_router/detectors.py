@@ -29,6 +29,16 @@ _PHONE = re.compile(
     r"|(?<![\w.])(?:\+\d{8,15}|0\d{8,11})(?![\w.])"
 )
 _DATE_LIKE = re.compile(r"^\d{1,4}[./-]\d{1,2}[./-]\d{1,4}$")
+# Dates and times are blanked before the phone check. OpenClaw 2026.9.x adds
+# "Reference UTC: 2026-10-04 13:20 UTC" to messages, and "2026-10-04 13" read
+# as a 10-digit phone number: every conversation's first turn was routed local
+# (live, 2026-10-04). Only the phone check uses the masked text; the
+# date-of-birth detector still sees the original.
+_DATETIME = re.compile(
+    r"\b(?:19|20)\d{2}[-/.]\d{1,2}[-/.]\d{1,2}(?:[ T]\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?"
+    r"|\b\d{1,2}[./-]\d{1,2}[./-](?:19|20)?\d{2}\b"
+    r"|\b\d{1,2}:\d{2}(?::\d{2})?\b"
+)
 
 _IBAN = re.compile(r"\b[A-Z]{2}\d{2}(?:[ ]?[A-Z0-9]{4}){2,7}(?:[ ]?[A-Z0-9]{1,3})?\b")
 _CARD = re.compile(r"(?<![\d-])(?:\d[ -]?){12,18}\d(?![\d-])")
@@ -81,6 +91,7 @@ def _ppsn_ok(digits: str, check: str, extra: str) -> bool:
 
 
 def _phone_hits(text: str) -> bool:
+    text = _DATETIME.sub(lambda m: " " * len(m.group()), text)
     for match in _PHONE.finditer(text):
         raw = match.group().strip()
         digits = _digits(raw)

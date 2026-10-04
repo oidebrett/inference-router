@@ -16,6 +16,7 @@ STRUCTURED = [
     ("Ring my mum on 0851234567 and tell her I'll be late.", "phone"),
     ("Customer phone is +353 87 123 4567, call her back.", "phone"),
     ("Office line: (01) 555 0199, ask for accounts.", "phone"),
+    ("Call 087 123 4567 on 2026-10-04 at 13:20 about the order.", "phone"),  # phone next to a date
     ("His SSN is 123-45-6789, add it to the tax form.", "us_ssn"),
     ("National Insurance number AB 12 34 56 C for the payroll record.", "uk_nino"),  # QQ is HMRC's example prefix, invalid
     ("PPS number 1234567TW for the Revenue form.", "ie_ppsn"),
@@ -52,4 +53,8 @@ NEGATIVE = [
     "Version 2026.9.2 of OpenClaw fixes the gateway token race.",
     "Matrix dims are 4096 x 4096 with batch 32 and 8 heads.",
     "Port range 30000-32767 is reserved for NodePorts.",
+    # OpenClaw 2026.9.x time context (live false positive, 2026-10-04)
+    "Current time: Sunday, October 4th, 2026 - 1:20 PM (UTC)\nReference UTC: 2026-10-04 13:20 UTC\nExplain TCP vs UDP.",
+    "Timestamp 2026-10-04T13:20:45.123Z, retried at 2026-10-04 13:21:02.",
+    "The job ran on 04/10/2026 at 13:20 and again on 05/10/2026 09:15.",
 ]
