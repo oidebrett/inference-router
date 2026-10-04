@@ -218,3 +218,9 @@ def test_marker_can_be_disabled():
     hook = PiiRouterHook(router=Router(FakeLaya()), env={"PII_ROUTER_LOCAL_MARKER": ""})
     data = _run(hook, {"model": "pii-router", "messages": [user("email ann@acme.ie")]})
     assert asyncio.run(hook.async_post_call_success_hook(data, None, _response("Hi"))).choices[0].message.content == "Hi"
+
+
+def test_system_prompt_pii_is_logged_but_does_not_change_routing():
+    d = Router(FakeLaya()).decide([{"role": "system", "content": "Memory: Ann's email is ann@acme.ie"}, user("hi")])
+    assert d.route == CLOUD and d.system_hits == ["email"]
+    assert d.log_fields()["system_hits"] == ["email"]

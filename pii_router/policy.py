@@ -78,6 +78,11 @@ class Decision:
     cached_units: int = 0
     laya_chunks: int = 0
     elapsed_ms: float = 0.0
+    # DIAGNOSTIC ONLY (does not affect routing): detector hits inside system/
+    # developer prompts, which are not scanned for routing. Used to find out
+    # whether agent memory (e.g. OpenClaw memory-core / MEMORY.md) re-injects PII
+    # from earlier sessions through the system prompt.
+    system_hits: list[str] = field(default_factory=list)
 
     def log_fields(self) -> dict:
         """What the decision log may contain: never message text."""
@@ -89,6 +94,7 @@ class Decision:
             "cached_units": self.cached_units,
             "laya_chunks": self.laya_chunks,
             "elapsed_ms": round(self.elapsed_ms, 1),
+            "system_hits": self.system_hits,
         }
 
 
@@ -124,6 +130,11 @@ class Router:
         decision = Decision(route=CLOUD)
         reasons: set[str] = set()
         pending: list[Unit] = []
+
+        system_text = "\n".join(
+            str(m.get("content") if isinstance(m.get("content"), str) else "")
+            for m in messages or [] if isinstance(m, dict) and m.get("role") in ("system", "developer"))
+        decision.system_hits = detect(system_text)
 
         for unit in message_units(messages):
             cached = self.cache.get(unit.key)
