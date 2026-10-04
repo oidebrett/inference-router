@@ -1,0 +1,4 @@
+# Pinned: verified together 2026-10-04 (tests/e2e.sh). torch is installed separately
+# from the CPU-only index by install.sh, so a VPS does not pull multi-GB CUDA wheels.
+laya[serve]==0.3.26
+litellm[proxy]==1.104.0

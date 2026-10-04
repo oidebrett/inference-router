@@ -1,0 +1,24 @@
+[Unit]
+Description=PII router - LiteLLM proxy (routes PII to local Ollama, the rest to NVIDIA)
+After=network-online.target pii-router-laya.service
+Wants=network-online.target pii-router-laya.service
+
+[Service]
+Type=simple
+User=pii-router
+Group=pii-router
+EnvironmentFile=/etc/pii-router/pii-router.env
+Environment=PYTHONPATH=/opt/pii-router
+Environment=LITELLM_LOCAL_MODEL_COST_MAP=True
+WorkingDirectory=/var/lib/pii-router
+ExecStart=/bin/sh -c 'exec /opt/pii-router/venv/bin/litellm --config /etc/pii-router/config.yaml --host "${PII_ROUTER_HOST}" --port "${PII_ROUTER_PORT}" --num_workers 1'
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/pii-router
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
