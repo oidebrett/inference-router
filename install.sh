@@ -105,6 +105,9 @@ for _ in $(seq 1 600); do curl -sf -o /dev/null "http://127.0.0.1:$LAYA_PORT/hea
 curl -sf -o /dev/null "http://127.0.0.1:$LAYA_PORT/health" || die "laya-serve did not become healthy (journalctl -u pii-router-laya)"
 systemctl restart pii-router.service
 PORT="${PII_ROUTER_PORT:-4100}"; HOST="${PII_ROUTER_HOST:-127.0.0.1}"
-for _ in $(seq 1 120); do curl -sf -o /dev/null "http://127.0.0.1:$PORT/health/liveliness" && break; sleep 1; done
-curl -sf -o /dev/null "http://127.0.0.1:$PORT/health/liveliness" || die "router did not become healthy (journalctl -u pii-router)"
+# Probe the address the router is bound to: agentgateway-setup.sh binds the Docker
+# bridge IP, where 127.0.0.1 is never answered (2026-10-04 first live install).
+PROBE_HOST="$HOST"; [ "$PROBE_HOST" = "0.0.0.0" ] && PROBE_HOST=127.0.0.1
+for _ in $(seq 1 120); do curl -sf -o /dev/null "http://$PROBE_HOST:$PORT/health/liveliness" && break; sleep 1; done
+curl -sf -o /dev/null "http://$PROBE_HOST:$PORT/health/liveliness" || die "router did not become healthy (journalctl -u pii-router)"
 log "ready: http://$HOST:$PORT/v1  model=pii-router  key=LITELLM_MASTER_KEY in $ENV_FILE"
