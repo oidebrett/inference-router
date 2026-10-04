@@ -162,3 +162,59 @@ def test_hook_fails_closed_on_router_bug():
 def test_unsupported_call_types_never_reach_the_cloud(call_type):
     hook = PiiRouterHook(router=Router(FakeLaya()), env={})
     assert _run(hook, {"model": "nvidia-cloud", "input": "x"}, call_type)["model"] == "ollama-local"
+
+
+# --- local-reply marker (†) ---------------------------------------------------
+from types import SimpleNamespace as NS
+
+
+def _response(content, tool_calls=None):
+    return NS(choices=[NS(message=NS(content=content, tool_calls=tool_calls))])
+
+
+def _chunks(*parts):
+    out = [NS(choices=[NS(delta=NS(content=p), finish_reason=None)]) for p in parts]
+    out.append(NS(choices=[NS(delta=NS(content=None), finish_reason="stop")]))
+    return out
+
+
+async def _agen(items):
+    for item in items:
+        yield item
+
+
+def _collect(hook, chunks, data):
+    async def run():
+        return [c async for c in hook.async_post_call_streaming_iterator_hook(None, _agen(chunks), data)]
+    return asyncio.run(run())
+
+
+def test_local_replies_get_the_marker_cloud_replies_do_not():
+    hook = PiiRouterHook(router=Router(FakeLaya()), env={})
+    local = _run(hook, {"model": "pii-router", "messages": [user("email ann@acme.ie")]})
+    cloud = _run(hook, {"model": "pii-router", "messages": [user("Explain TCP")]})
+    assert asyncio.run(hook.async_post_call_success_hook(local, None, _response("Hi Ann"))).choices[0].message.content == "Hi Ann †"
+    assert asyncio.run(hook.async_post_call_success_hook(cloud, None, _response("TCP is"))).choices[0].message.content == "TCP is"
+
+
+def test_marker_is_added_to_the_final_streamed_chunk():
+    hook = PiiRouterHook(router=Router(FakeLaya()), env={})
+    data = _run(hook, {"model": "pii-router", "messages": [user("email ann@acme.ie")]})
+    chunks = _collect(hook, _chunks("Hi ", "Ann"), data)
+    text = "".join(c.choices[0].delta.content or "" for c in chunks)
+    assert text == "Hi Ann †"
+
+
+def test_tool_call_only_replies_are_untouched():
+    hook = PiiRouterHook(router=Router(FakeLaya()), env={})
+    data = _run(hook, {"model": "pii-router", "messages": [user("email ann@acme.ie")]})
+    reply = _response(None, tool_calls=[{"id": "1"}])
+    assert asyncio.run(hook.async_post_call_success_hook(data, None, reply)).choices[0].message.content is None
+    streamed = _collect(hook, [NS(choices=[NS(delta=NS(content=None), finish_reason="tool_calls")])], data)
+    assert streamed[0].choices[0].delta.content is None
+
+
+def test_marker_can_be_disabled():
+    hook = PiiRouterHook(router=Router(FakeLaya()), env={"PII_ROUTER_LOCAL_MARKER": ""})
+    data = _run(hook, {"model": "pii-router", "messages": [user("email ann@acme.ie")]})
+    assert asyncio.run(hook.async_post_call_success_hook(data, None, _response("Hi"))).choices[0].message.content == "Hi"

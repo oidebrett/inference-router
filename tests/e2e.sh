@@ -25,6 +25,9 @@ check() { # message stream expected
     -H "Content-Type: application/json" -d "{\"model\":\"pii-router\",\"stream\":$2,\"messages\":[{\"role\":\"user\",\"content\":\"$1\"}]}")
   local got; got=$(echo "$out" | grep -oE "answered-by-[a-z]+" | head -1 | sed 's/answered-by-//')
   if [ "$got" = "$3" ]; then echo "PASS [$3 stream=$2] $1"; else echo "FAIL [want $3 got '${got}' stream=$2] $1"; fail=1; fi
+  # The local-reply marker: present on local answers, absent on cloud answers.
+  if [ "$3" = local ] && ! echo "$out" | grep -q '\\u2020\|†'; then echo "FAIL: local reply has no † marker"; fail=1; fi
+  if [ "$3" = cloud ] && echo "$out" | grep -q '\\u2020\|†'; then echo "FAIL: cloud reply carries the † marker"; fail=1; fi
 }
 check "Explain the difference between TCP and UDP." false cloud
 check "Explain the difference between TCP and UDP." true cloud
