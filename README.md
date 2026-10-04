@@ -37,6 +37,9 @@ prompts (it misses numbers: IBAN, phone, card), the detectors alone 8/12, togeth
 The bare question "does this contain PII?" caught only 3/12 — the wording in
 `policy.PII_QUESTION` matters.
 
+Parked follow-up: a **Masked** mode that pseudonymises identifiers and keeps those conversations
+on NVIDIA instead of going local — see [`DESIGN-masked-mode.md`](DESIGN-masked-mode.md).
+
 ## Install (on the gateway host)
 
 ```bash
