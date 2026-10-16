@@ -5,7 +5,8 @@
 #
 # Required: OLLAMA_MODEL (local model for PII requests, e.g. qwen3.5:0.8b on 8 GB, qwen3.5:4b on 16 GB; must support tool calling),
 #           NVIDIA_API_KEY (cloud backend for everything else).
-# Optional: NVIDIA_MODEL (default nvidia/nemotron-3-ultra-550b-a55b), OLLAMA_BASE_URL
+# Optional: NVIDIA_MODEL (default nvidia/nemotron-3.5-super-vl-120b-a12b; manidae-cloud
+# passes its configured default explicitly), OLLAMA_BASE_URL
 #           (default http://127.0.0.1:11434), PII_ROUTER_HOST (127.0.0.1), PII_ROUTER_PORT (4100),
 #           LAYA_PORT (4101), PII_ROUTER_LAYA_THRESHOLD (0.4).
 #
@@ -89,7 +90,7 @@ ENVEOF
 chown root:pii-router "$ENV_FILE.new" && chmod 0640 "$ENV_FILE.new" && mv "$ENV_FILE.new" "$ENV_FILE"
 
 log "rendering LiteLLM config"
-OLLAMA_MODEL="$OLLAMA_MODEL" NVIDIA_MODEL="${NVIDIA_MODEL:-nvidia/nemotron-3-ultra-550b-a55b}" \
+OLLAMA_MODEL="$OLLAMA_MODEL" NVIDIA_MODEL="${NVIDIA_MODEL:-nvidia/nemotron-3.5-super-vl-120b-a12b}" \
   OLLAMA_BASE_URL="${OLLAMA_BASE_URL:-http://127.0.0.1:11434}" \
   PYTHONPATH="$PREFIX" "$PREFIX/venv/bin/python" -m pii_router.render_config "$ETC/config.yaml"
 chown root:pii-router "$ETC/config.yaml" && chmod 0640 "$ETC/config.yaml"

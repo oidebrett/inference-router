@@ -25,7 +25,7 @@ LOCAL = "ollama-local"
 
 def build(env=os.environ) -> dict:
     ollama_model = env.get("OLLAMA_MODEL", "").strip()
-    nvidia_model = env.get("NVIDIA_MODEL", "nvidia/nemotron-3-ultra-550b-a55b").strip()
+    nvidia_model = env.get("NVIDIA_MODEL", "nvidia/nemotron-3.5-super-vl-120b-a12b").strip()
     if not ollama_model:
         raise SystemExit("OLLAMA_MODEL is required (the local model PII requests are routed to)")
     ollama_base = env.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
