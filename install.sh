@@ -11,6 +11,7 @@
 # Optional: NVIDIA_MODEL (default nvidia/nemotron-3.5-super-vl-120b-a12b; manidae-cloud
 # passes its configured default explicitly), OLLAMA_BASE_URL
 #           (default http://127.0.0.1:11434), PII_ROUTER_HOST (127.0.0.1), PII_ROUTER_PORT (4100),
+#           LITELLM_MASTER_KEY (the router's client key; generated once if not given),
 #           LAYA_PORT (4101), PII_ROUTER_LAYA_THRESHOLD (0.4).
 #
 # Result: OpenAI-compatible endpoint http://$PII_ROUTER_HOST:$PII_ROUTER_PORT/v1, model "pii-router",
@@ -82,7 +83,9 @@ rm -rf "$PREFIX/pii_router" && mv "$PREFIX/pii_router.new" "$PREFIX/pii_router"
 
 # Secrets: generate once, keep on re-run so the configured provider key stays valid.
 existing() { [ -f "$ENV_FILE" ] && sed -n "s/^$1=//p" "$ENV_FILE" | tail -1 || true; }
-MASTER_KEY="$(existing LITELLM_MASTER_KEY)"; [ -n "$MASTER_KEY" ] || MASTER_KEY="sk-pii-$(openssl rand -hex 24)"
+# LITELLM_MASTER_KEY from the caller wins (PrivateInference: manidae-cloud generates it
+# so it can show it to the customer); otherwise keep the existing one, else generate.
+MASTER_KEY="${LITELLM_MASTER_KEY:-$(existing LITELLM_MASTER_KEY)}"; [ -n "$MASTER_KEY" ] || MASTER_KEY="sk-pii-$(openssl rand -hex 24)"
 LAYA_KEY="$(existing LAYA_API_KEY)"; [ -n "$LAYA_KEY" ] || LAYA_KEY="$(openssl rand -hex 24)"
 LAYA_PORT="${LAYA_PORT:-4101}"
 umask 027
