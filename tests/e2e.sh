@@ -14,7 +14,8 @@ trap cleanup EXIT
 LAYA_HOST=127.0.0.1 LAYA_PORT=18103 LAYA_DEVICE=cpu LAYA_MODELS=english "$BIN/laya-serve" >"$WORK/laya.log" 2>&1 & pids+=($!)
 OLLAMA_MODEL=qwen3:4b OLLAMA_BASE_URL=http://127.0.0.1:18102 NVIDIA_BASE_URL=http://127.0.0.1:18101/v1 \
   "$PY" -m pii_router.render_config "$WORK/config.yaml"
-for i in $(seq 1 180); do curl -sf -o /dev/null http://127.0.0.1:18103/health && break; sleep 1; done
+# First run downloads the Laya checkpoint (~1.7 GB); allow LAYA_WAIT seconds.
+for i in $(seq 1 "${LAYA_WAIT:-900}"); do curl -sf -o /dev/null http://127.0.0.1:18103/health && break; sleep 1; done
 PYTHONPATH="$PWD" PII_ROUTER_LAYA_URL=http://127.0.0.1:18103 LITELLM_MASTER_KEY="$KEY" NVIDIA_API_KEY=fake \
   LITELLM_LOCAL_MODEL_COST_MAP=True "$BIN/litellm" --config "$WORK/config.yaml" --host 127.0.0.1 --port 18100 \
   >"$WORK/litellm.log" 2>&1 & pids+=($!)
