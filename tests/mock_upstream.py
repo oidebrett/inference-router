@@ -9,6 +9,8 @@ async def models():
 @app.post("/v1/chat/completions")
 async def cc(req: Request):
     body = await req.json(); text = f"answered-by-{NAME} model={body.get('model')}"
+    if "fail" in str(body.get("model")):  # simulate NVIDIA's "Failed to generate completions"
+        return JSONResponse({"message": "Failed to generate completions", "code": 500}, status_code=500)
     if body.get("stream"):
         def gen():
             for w in text.split(" "):

@@ -10,6 +10,10 @@ Group=pii-router
 EnvironmentFile=/etc/pii-router/pii-router.env
 Environment=PYTHONPATH=/opt/pii-router
 Environment=LITELLM_LOCAL_MODEL_COST_MAP=True
+# The endpoint is public (key-protected): do not serve LiteLLM's API docs or admin UI.
+Environment=NO_DOCS=True
+Environment=NO_REDOC=True
+Environment=DISABLE_ADMIN_UI=True
 WorkingDirectory=/var/lib/pii-router
 ExecStart=/bin/sh -c 'exec /opt/pii-router/venv/bin/litellm --config /etc/pii-router/config.yaml --host "${PII_ROUTER_HOST}" --port "${PII_ROUTER_PORT}" --num_workers 1'
 Restart=always

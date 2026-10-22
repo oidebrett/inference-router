@@ -41,9 +41,10 @@ else
   [ -n "${NVIDIA_API_KEY:-}" ] || die "NVIDIA_API_KEY (or CLOUD_BASE_URL) is required"
 fi
 NVIDIA_MODEL="${NVIDIA_MODEL:-nvidia/nemotron-3.5-super-vl-120b-a12b}"
-FALLBACK_BASE_URL=""; FALLBACK_MODEL=""
+FALLBACK_BASE_URL=""; FALLBACK_MODEL=""; FALLBACK2_MODEL=""
 if [ -n "${CLOUD_BASE_URL:-}" ] && [ -n "${NVIDIA_API_KEY:-}" ]; then
   FALLBACK_BASE_URL="${NVIDIA_BASE_URL:-https://integrate.api.nvidia.com/v1}"; FALLBACK_MODEL="$NVIDIA_MODEL"
+  FALLBACK2_MODEL="${NVIDIA_FALLBACK_MODEL:-}"   # second NVIDIA model, tried when the first fails
 fi
 PYTHON="${PYTHON:-python3}"
 "$PYTHON" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' || die "Python 3.10+ required"
@@ -124,7 +125,7 @@ log "rendering LiteLLM config"
 OLLAMA_MODEL="${OLLAMA_MODEL:-}" NVIDIA_MODEL="$NVIDIA_MODEL" PII_ROUTER_MODE="$PII_MODE" \
   OLLAMA_BASE_URL="${OLLAMA_BASE_URL:-http://127.0.0.1:11434}" \
   CLOUD_BASE_URL="${CLOUD_BASE_URL:-}" CLOUD_MODEL="${CLOUD_MODEL:-}" \
-  FALLBACK_BASE_URL="$FALLBACK_BASE_URL" FALLBACK_MODEL="$FALLBACK_MODEL" \
+  FALLBACK_BASE_URL="$FALLBACK_BASE_URL" FALLBACK_MODEL="$FALLBACK_MODEL" FALLBACK2_MODEL="$FALLBACK2_MODEL" \
   PII_ROUTER_LOCAL_REASONING_EFFORT="${PII_ROUTER_LOCAL_REASONING_EFFORT-none}" \
   PYTHONPATH="$PREFIX" "$PREFIX/venv/bin/python" -m pii_router.render_config "$ETC/config.yaml"
 chown root:pii-router "$ETC/config.yaml" && chmod 0640 "$ETC/config.yaml"

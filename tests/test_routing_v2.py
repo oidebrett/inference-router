@@ -312,3 +312,38 @@ def test_install_sh_skips_laya_in_off_mode():
     assert 'grep -v \'^laya\'' in text
     assert 'rm -f /etc/systemd/system/pii-router-laya.service' in text
     assert 'PII_ROUTER_MODE=$PII_MODE' in text
+
+
+# --- second NVIDIA fallback + no public docs (2026-10-22) ---------------------------------
+
+def test_second_fallback_is_wired_as_a_litellm_fallback_in_both_modes():
+    env = {"CLOUD_BASE_URL": "https://gpu/v1", "CLOUD_MODEL": "g", "FALLBACK_BASE_URL": "https://nv/v1",
+           "FALLBACK_MODEL": "nv-1", "FALLBACK2_MODEL": "nv-2"}
+    for extra in ({"PII_ROUTER_MODE": "off"}, {"OLLAMA_MODEL": "m"}):
+        cfg = render_config.build({**env, **extra})
+        m = _names(cfg)
+        assert m["cloud-fallback-2"]["model"] == "openai/nv-2"
+        assert m["cloud-fallback-2"]["api_key"] == "os.environ/FALLBACK_API_KEY"
+        assert cfg["router_settings"]["fallbacks"] == [{"cloud-fallback": ["cloud-fallback-2"]}]
+        # never a path to the local model
+        assert all("ollama" not in t for f in cfg["router_settings"]["fallbacks"] for v in f.values() for t in v)
+
+
+def test_no_fallback_chain_without_a_second_model():
+    cfg = render_config.build({"PII_ROUTER_MODE": "off", "CLOUD_BASE_URL": "https://gpu/v1", "CLOUD_MODEL": "g",
+                               "FALLBACK_BASE_URL": "https://nv/v1", "FALLBACK_MODEL": "nv-1"})
+    assert "fallbacks" not in cfg["router_settings"]
+    assert "cloud-fallback-2" not in _names(cfg)
+
+
+def test_second_fallback_name_cannot_be_used_to_bypass():
+    h = hook(env=FALLBACK_ENV, health=FakeHealth())
+    data = {"model": "cloud-fallback-2", "messages": [user("email ann@acme.ie")]}
+    assert asyncio.run(h.async_pre_call_hook(None, None, data, "acompletion"))["model"] == "ollama-local"
+
+
+def test_systemd_unit_hides_litellm_docs_and_admin_ui():
+    import pathlib
+    unit = (pathlib.Path(__file__).resolve().parents[1] / "systemd/pii-router.service").read_text()
+    for line in ("NO_DOCS=True", "NO_REDOC=True", "DISABLE_ADMIN_UI=True"):
+        assert line in unit

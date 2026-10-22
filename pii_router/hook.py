@@ -60,7 +60,8 @@ class PiiRouterHook(CustomLogger):
         self.local_model = env.get("PII_ROUTER_LOCAL_MODEL_NAME", "ollama-local")
         self.fallback_model = (env.get("PII_ROUTER_FALLBACK_MODEL_NAME", "cloud-fallback")
                                if (env.get("FALLBACK_BASE_URL") or "").strip() else None)
-        self.remote_models = {m for m in (self.cloud_model, self.fallback_model, LEGACY_CLOUD_MODEL) if m}
+        self.remote_models = {m for m in (self.cloud_model, self.fallback_model, LEGACY_CLOUD_MODEL,
+                                          "cloud-fallback-2") if m}
         self.pii_off = (env.get("PII_ROUTER_MODE") or "on").strip().lower() == "off"
         self.router = router or Router(LayaHttpScorer.from_env(env), Settings.from_env(env))
         self.health = health if health is not None else CloudHealth.from_env(env)

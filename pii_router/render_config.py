@@ -25,6 +25,7 @@ import sys
 PUBLIC = "pii-router"
 CLOUD = "cloud"
 FALLBACK = "cloud-fallback"
+FALLBACK2 = "cloud-fallback-2"
 LOCAL = "ollama-local"
 NVIDIA_BASE = "https://integrate.api.nvidia.com/v1"
 NVIDIA_DEFAULT_MODEL = "nvidia/nemotron-3.5-super-vl-120b-a12b"
@@ -65,36 +66,43 @@ def build(env=os.environ) -> dict:
         {"model_name": LOCAL, "litellm_params": dict(local_params)},
         {"model_name": CLOUD, "litellm_params": _cloud_params(env)},
     ]
-    fallback_base = env.get("FALLBACK_BASE_URL", "").strip()
-    if fallback_base:
-        fallback_model = env.get("FALLBACK_MODEL", "").strip()
-        if not fallback_model:
-            raise SystemExit("FALLBACK_MODEL is required with FALLBACK_BASE_URL")
-        model_list.append({"model_name": FALLBACK, "litellm_params": {
-            "model": f"openai/{fallback_model}", "api_base": fallback_base.rstrip("/"),
-            "api_key": "os.environ/FALLBACK_API_KEY"}})
+    model_list += _fallback_models(env)
+    return {"model_list": model_list, **_settings(model_list)}
+
+
+def _fallback_models(env) -> list:
+    """FALLBACK_MODEL (+ optional FALLBACK2_MODEL) on FALLBACK_BASE_URL. The second
+    model is tried by LiteLLM when the first fails (NVIDIA's hosted models have
+    multi-minute 'Failed to generate completions' spells, seen 2026-10-22). Both are
+    remote, so this can never move a request to the local model."""
+    base = env.get("FALLBACK_BASE_URL", "").strip()
+    if not base:
+        return []
+    first = env.get("FALLBACK_MODEL", "").strip()
+    if not first:
+        raise SystemExit("FALLBACK_MODEL is required with FALLBACK_BASE_URL")
+    out = []
+    for name, model in ((FALLBACK, first), (FALLBACK2, env.get("FALLBACK2_MODEL", "").strip())):
+        if model:
+            out.append({"model_name": name, "litellm_params": {
+                "model": f"openai/{model}", "api_base": base.rstrip("/"),
+                "api_key": "os.environ/FALLBACK_API_KEY"}})
+    return out
+
+
+def _settings(model_list) -> dict:
+    names = {m["model_name"] for m in model_list}
+    router = {"enable_pre_call_checks": False}
+    if {FALLBACK, FALLBACK2} <= names:
+        router["fallbacks"] = [{FALLBACK: [FALLBACK2]}]
     return {
-        "model_list": model_list,
         "litellm_settings": {
             "callbacks": "pii_router.hook.proxy_handler_instance",
             # Agents send provider-specific params; the other backend may reject them.
             "drop_params": True,
             "num_retries": 0,  # a retry must not silently move a request to the other backend
         },
-        "router_settings": {"enable_pre_call_checks": False},
-        "general_settings": {"master_key": "os.environ/LITELLM_MASTER_KEY"},
-    }
-
-
-def _settings() -> dict:
-    return {
-        "litellm_settings": {
-            "callbacks": "pii_router.hook.proxy_handler_instance",
-            # Agents send provider-specific params; the other backend may reject them.
-            "drop_params": True,
-            "num_retries": 0,  # a retry must not silently move a request to the other backend
-        },
-        "router_settings": {"enable_pre_call_checks": False},
+        "router_settings": router,
         "general_settings": {"master_key": "os.environ/LITELLM_MASTER_KEY"},
     }
 
@@ -107,16 +115,8 @@ def _build_unchecked(env) -> dict:
     model_list = [
         {"model_name": PUBLIC, "litellm_params": dict(cloud)},
         {"model_name": CLOUD, "litellm_params": dict(cloud)},
-    ]
-    fallback_base = env.get("FALLBACK_BASE_URL", "").strip()
-    if fallback_base:
-        fallback_model = env.get("FALLBACK_MODEL", "").strip()
-        if not fallback_model:
-            raise SystemExit("FALLBACK_MODEL is required with FALLBACK_BASE_URL")
-        model_list.append({"model_name": FALLBACK, "litellm_params": {
-            "model": f"openai/{fallback_model}", "api_base": fallback_base.rstrip("/"),
-            "api_key": "os.environ/FALLBACK_API_KEY"}})
-    return {"model_list": model_list, **_settings()}
+    ] + _fallback_models(env)
+    return {"model_list": model_list, **_settings(model_list)}
 
 
 def main(argv=None) -> int:
