@@ -256,3 +256,59 @@ def test_local_model_thinking_is_off_by_default_and_configurable():
     assert "extra_body" not in m["cloud"]
     m = _names(render_config.build({"OLLAMA_MODEL": "m", "PII_ROUTER_LOCAL_REASONING_EFFORT": ""}))
     assert "extra_body" not in m["ollama-local"]
+
+
+# --- PII_ROUTER_MODE=off (PrivateInference default) ------------------------------------
+
+OFF = {"PII_ROUTER_MODE": "off"}
+
+
+class ExplodingLaya:
+    def score(self, texts):
+        raise AssertionError("PII routing off must never call Laya")
+
+
+def test_off_mode_sends_pii_to_the_cloud_without_scanning():
+    h = PiiRouterHook(router=Router(ExplodingLaya()), env=OFF, health=None)
+    data = run(h, [user("email ann@acme.ie about invoice 4471")])
+    assert data["model"] == "cloud"
+    assert headers(h, data) == {"x-pii-route": "cloud", "x-pii-reason": "unchecked"}
+    assert reply(h, data, "Done") == "Done"  # no markers
+
+
+def test_off_mode_uses_the_fallback_while_the_gpu_is_down():
+    h = PiiRouterHook(router=Router(ExplodingLaya()), env={**OFF, **FALLBACK_ENV}, health=FakeHealth(up=False))
+    data = run(h, [user("hello")])
+    assert data["model"] == "cloud-fallback"
+    assert headers(h, data)["x-pii-route"] == "fallback"
+
+
+def test_off_mode_never_routes_local_even_for_other_call_types():
+    h = PiiRouterHook(router=Router(ExplodingLaya()), env=OFF, health=None)
+    data = asyncio.run(h.async_pre_call_hook(None, None, {"model": "pii-router", "input": "x"}, "aembedding"))
+    assert data["model"] == "cloud"
+
+
+def test_off_mode_failure_marks_the_gpu_down():
+    health = FakeHealth()
+    h = PiiRouterHook(router=Router(ExplodingLaya()), env={**OFF, **FALLBACK_ENV}, health=health)
+    data = run(h, [user("hello")])
+    asyncio.run(h.async_post_call_failure_hook(data, ConnectionError("gpu gone"), None))
+    assert health.marked_down
+    assert run(h, [user("again")])["model"] == "cloud-fallback"
+
+
+def test_render_off_mode_needs_no_local_model_and_points_public_at_the_cloud():
+    m = _names(render_config.build({**OFF, "CLOUD_BASE_URL": "https://gpu.ex/v1", "CLOUD_MODEL": "qwen3.8-27b",
+                                    "FALLBACK_BASE_URL": "https://n/v1", "FALLBACK_MODEL": "nv"}))
+    assert set(m) == {"pii-router", "cloud", "cloud-fallback"}
+    assert m["pii-router"] == m["cloud"]
+    assert "ollama-local" not in m
+
+
+def test_install_sh_skips_laya_in_off_mode():
+    import pathlib
+    text = (pathlib.Path(__file__).resolve().parents[1] / "install.sh").read_text()
+    assert 'grep -v \'^laya\'' in text
+    assert 'rm -f /etc/systemd/system/pii-router-laya.service' in text
+    assert 'PII_ROUTER_MODE=$PII_MODE' in text

@@ -70,6 +70,14 @@ sudo OLLAMA_MODEL=qwen3.5:4b CLOUD_BASE_URL=https://gpu.example/v1 CLOUD_MODEL=q
      CLOUD_API_KEY=... NVIDIA_API_KEY=nvapi-... scripts/pii-router/install.sh
 ```
 
+## PII routing off (`PII_ROUTER_MODE=off`)
+
+PrivateInference's default: the router is only an authenticated, health-checked front for
+the customer's GPU. Nothing is scanned, Laya/torch are not installed (its unit is removed),
+no local model is needed, and every request goes to the cloud backend, or to the NVIDIA
+fallback while the GPU is down. Replies carry `x-pii-reason: unchecked` and no markers.
+Overhead is the LiteLLM hop only.
+
 ## Install (on the gateway host)
 
 ```bash

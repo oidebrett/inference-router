@@ -43,7 +43,10 @@ def _cloud_params(env) -> dict:
 
 
 def build(env=os.environ) -> dict:
+    pii_off = (env.get("PII_ROUTER_MODE") or "on").strip().lower() == "off"
     ollama_model = env.get("OLLAMA_MODEL", "").strip()
+    if pii_off:
+        return _build_unchecked(env)
     if not ollama_model:
         raise SystemExit("OLLAMA_MODEL is required (the local model PII requests are routed to)")
     ollama_base = env.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
@@ -81,6 +84,39 @@ def build(env=os.environ) -> dict:
         "router_settings": {"enable_pre_call_checks": False},
         "general_settings": {"master_key": "os.environ/LITELLM_MASTER_KEY"},
     }
+
+
+def _settings() -> dict:
+    return {
+        "litellm_settings": {
+            "callbacks": "pii_router.hook.proxy_handler_instance",
+            # Agents send provider-specific params; the other backend may reject them.
+            "drop_params": True,
+            "num_retries": 0,  # a retry must not silently move a request to the other backend
+        },
+        "router_settings": {"enable_pre_call_checks": False},
+        "general_settings": {"master_key": "os.environ/LITELLM_MASTER_KEY"},
+    }
+
+
+def _build_unchecked(env) -> dict:
+    """PII_ROUTER_MODE=off: no local model. The public name points at the cloud
+    backend (there is nothing local to fail closed to); the hook still swaps in the
+    fallback while the cloud is down."""
+    cloud = _cloud_params(env)
+    model_list = [
+        {"model_name": PUBLIC, "litellm_params": dict(cloud)},
+        {"model_name": CLOUD, "litellm_params": dict(cloud)},
+    ]
+    fallback_base = env.get("FALLBACK_BASE_URL", "").strip()
+    if fallback_base:
+        fallback_model = env.get("FALLBACK_MODEL", "").strip()
+        if not fallback_model:
+            raise SystemExit("FALLBACK_MODEL is required with FALLBACK_BASE_URL")
+        model_list.append({"model_name": FALLBACK, "litellm_params": {
+            "model": f"openai/{fallback_model}", "api_base": fallback_base.rstrip("/"),
+            "api_key": "os.environ/FALLBACK_API_KEY"}})
+    return {"model_list": model_list, **_settings()}
 
 
 def main(argv=None) -> int:

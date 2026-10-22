@@ -18,6 +18,10 @@ Every reply says where it was answered and, for local, why:
            context would go back to the cloud), " †!" could not be cleared.
 The router strips its own markers from assistant history before deciding and
 forwarding, because clients re-send the whole conversation every turn.
+
+PII_ROUTER_MODE=off (PrivateInference without PII routing): nothing is scanned
+and there is no local model; every request goes to the cloud backend, or the
+fallback while the cloud is down (x-pii-reason: unchecked, no markers).
 """
 
 from __future__ import annotations
@@ -45,6 +49,7 @@ if not log.handlers:
 CHAT_CALL_TYPES = {"completion", "acompletion"}
 FALLBACK = "fallback"
 CLEAN = "clean"
+UNCHECKED = "unchecked"  # PII_ROUTER_MODE=off: not scanned
 LEGACY_CLOUD_MODEL = "nvidia-cloud"  # deployment name before 2026-10-22
 
 
@@ -56,6 +61,7 @@ class PiiRouterHook(CustomLogger):
         self.fallback_model = (env.get("PII_ROUTER_FALLBACK_MODEL_NAME", "cloud-fallback")
                                if (env.get("FALLBACK_BASE_URL") or "").strip() else None)
         self.remote_models = {m for m in (self.cloud_model, self.fallback_model, LEGACY_CLOUD_MODEL) if m}
+        self.pii_off = (env.get("PII_ROUTER_MODE") or "on").strip().lower() == "off"
         self.router = router or Router(LayaHttpScorer.from_env(env), Settings.from_env(env))
         self.health = health if health is not None else CloudHealth.from_env(env)
         # Appended to replies from the LOCAL model so a user or agent can see where an
@@ -119,6 +125,8 @@ class PiiRouterHook(CustomLogger):
 
     async def async_pre_call_hook(self, user_api_key_dict, cache, data, call_type):
         requested = data.get("model")
+        if self.pii_off:
+            return await self._route_unchecked(data, call_type, requested)
         if call_type not in CHAT_CALL_TYPES:
             # Only chat completions are inspected. Anything else that targets our
             # deployments is pinned local rather than passed through unchecked.
@@ -148,6 +156,17 @@ class PiiRouterHook(CustomLogger):
         self._log(fields)
         return data
 
+    async def _route_unchecked(self, data, call_type, requested):
+        """PII routing off: cloud, or the fallback while the cloud is down. Never local."""
+        route = CLOUD
+        if self.health is not None and self.fallback_model and not await asyncio.to_thread(self.health.healthy):
+            route = FALLBACK
+        data["model"] = self.cloud_model if route == CLOUD else self.fallback_model
+        self._set_meta(data, route, UNCHECKED)
+        self._log({"route": route, "reasons": ["pii_routing_off"], "call_type": call_type,
+                   "requested": requested, "target": data["model"]})
+        return data
+
     async def async_post_call_failure_hook(self, request_data, original_exception, user_api_key_dict,
                                            traceback_str=None):
         # A failed cloud call marks the cloud down so the NEXT request is re-routed.
@@ -163,6 +182,8 @@ class PiiRouterHook(CustomLogger):
         if route is None:
             return None
         reason = self._meta(data).get("pii_router_reason") or CLEAN
+        if reason == UNCHECKED:
+            return {"x-pii-route": route, "x-pii-reason": UNCHECKED}
         return {"x-pii-route": route, "x-pii-reason": reason if route == LOCAL else CLEAN}
 
     async def async_post_call_success_hook(self, data, user_api_key_dict, response):

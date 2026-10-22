@@ -13,6 +13,9 @@
 #           (default http://127.0.0.1:11434), PII_ROUTER_HOST (127.0.0.1), PII_ROUTER_PORT (4100),
 #           LITELLM_MASTER_KEY (the router's client key; generated once if not given),
 #           LAYA_PORT (4101), PII_ROUTER_LAYA_THRESHOLD (0.4).
+# PII_ROUTER_MODE=off (PrivateInference without PII routing): no PII check, no local model.
+#           OLLAMA_MODEL is not needed, Laya/torch are not installed and its unit is removed;
+#           everything goes to the cloud backend (or the NVIDIA fallback while it is down).
 #
 # Result: OpenAI-compatible endpoint http://$PII_ROUTER_HOST:$PII_ROUTER_PORT/v1, model "pii-router",
 # authenticated with LITELLM_MASTER_KEY from /etc/pii-router/pii-router.env (generated once,
@@ -29,7 +32,9 @@ log() { printf '[pii-router] %s\n' "$*"; }
 die() { printf '[pii-router] ERROR: %s\n' "$*" >&2; exit 1; }
 
 [ "$(id -u)" -eq 0 ] || die "run as root"
-[ -n "${OLLAMA_MODEL:-}" ] || die "OLLAMA_MODEL is required"
+PII_MODE="$(printf '%s' "${PII_ROUTER_MODE:-on}" | tr '[:upper:]' '[:lower:]')"
+[ "$PII_MODE" = "on" ] || [ "$PII_MODE" = "off" ] || die "PII_ROUTER_MODE must be on or off"
+[ "$PII_MODE" = "off" ] || [ -n "${OLLAMA_MODEL:-}" ] || die "OLLAMA_MODEL is required (or PII_ROUTER_MODE=off)"
 if [ -n "${CLOUD_BASE_URL:-}" ]; then
   [ -n "${CLOUD_MODEL:-}" ] || die "CLOUD_MODEL is required with CLOUD_BASE_URL"
 else
@@ -68,12 +73,18 @@ if [ ! -x "$PREFIX/venv/bin/python" ]; then
   "$PYTHON" -m venv "$PREFIX/venv"
 fi
 "$PREFIX/venv/bin/python" -m pip install --quiet --upgrade pip
-if [ "$(uname -m)" = "x86_64" ]; then
+if [ "$PII_MODE" = "on" ] && [ "$(uname -m)" = "x86_64" ]; then
   log "installing CPU-only torch (avoids multi-GB CUDA wheels)"
   "$PREFIX/venv/bin/python" -m pip install --quiet torch==2.14.1 --index-url https://download.pytorch.org/whl/cpu
 fi
-log "installing laya + litellm"
-"$PREFIX/venv/bin/python" -m pip install --quiet -r "$SRC_DIR/requirements.txt"
+if [ "$PII_MODE" = "on" ]; then
+  log "installing laya + litellm"
+  "$PREFIX/venv/bin/python" -m pip install --quiet -r "$SRC_DIR/requirements.txt"
+else
+  log "installing litellm (PII routing off: no Laya)"
+  grep -v '^laya' "$SRC_DIR/requirements.txt" > "$STATE/requirements-off.txt"
+  "$PREFIX/venv/bin/python" -m pip install --quiet -r "$STATE/requirements-off.txt"
+fi
 
 log "installing router package"
 rm -rf "$PREFIX/pii_router.new"
@@ -104,12 +115,13 @@ PII_ROUTER_LAYA_URL=http://127.0.0.1:$LAYA_PORT
 PII_ROUTER_LAYA_THRESHOLD=${PII_ROUTER_LAYA_THRESHOLD:-0.4}
 PII_ROUTER_HOST=${PII_ROUTER_HOST:-127.0.0.1}
 PII_ROUTER_PORT=${PII_ROUTER_PORT:-4100}
-OLLAMA_MODEL=$OLLAMA_MODEL
+OLLAMA_MODEL=${OLLAMA_MODEL:-}
+PII_ROUTER_MODE=$PII_MODE
 ENVEOF
 chown root:pii-router "$ENV_FILE.new" && chmod 0640 "$ENV_FILE.new" && mv "$ENV_FILE.new" "$ENV_FILE"
 
 log "rendering LiteLLM config"
-OLLAMA_MODEL="$OLLAMA_MODEL" NVIDIA_MODEL="$NVIDIA_MODEL" \
+OLLAMA_MODEL="${OLLAMA_MODEL:-}" NVIDIA_MODEL="$NVIDIA_MODEL" PII_ROUTER_MODE="$PII_MODE" \
   OLLAMA_BASE_URL="${OLLAMA_BASE_URL:-http://127.0.0.1:11434}" \
   CLOUD_BASE_URL="${CLOUD_BASE_URL:-}" CLOUD_MODEL="${CLOUD_MODEL:-}" \
   FALLBACK_BASE_URL="$FALLBACK_BASE_URL" FALLBACK_MODEL="$FALLBACK_MODEL" \
@@ -118,14 +130,22 @@ OLLAMA_MODEL="$OLLAMA_MODEL" NVIDIA_MODEL="$NVIDIA_MODEL" \
 chown root:pii-router "$ETC/config.yaml" && chmod 0640 "$ETC/config.yaml"
 
 log "installing systemd units"
-install -m 0644 "$SRC_DIR/systemd/pii-router-laya.service" /etc/systemd/system/pii-router-laya.service
 install -m 0644 "$SRC_DIR/systemd/pii-router.service" /etc/systemd/system/pii-router.service
-systemctl daemon-reload
-systemctl enable pii-router-laya.service pii-router.service >/dev/null
-systemctl restart pii-router-laya.service
-log "waiting for Laya (first start downloads the checkpoint, ~1.7 GB)"
-for _ in $(seq 1 600); do curl -sf -o /dev/null "http://127.0.0.1:$LAYA_PORT/health" && break; sleep 1; done
-curl -sf -o /dev/null "http://127.0.0.1:$LAYA_PORT/health" || die "laya-serve did not become healthy (journalctl -u pii-router-laya)"
+if [ "$PII_MODE" = "on" ]; then
+  install -m 0644 "$SRC_DIR/systemd/pii-router-laya.service" /etc/systemd/system/pii-router-laya.service
+  systemctl daemon-reload
+  systemctl enable pii-router-laya.service pii-router.service >/dev/null
+  systemctl restart pii-router-laya.service
+  log "waiting for Laya (first start downloads the checkpoint, ~1.7 GB)"
+  for _ in $(seq 1 600); do curl -sf -o /dev/null "http://127.0.0.1:$LAYA_PORT/health" && break; sleep 1; done
+  curl -sf -o /dev/null "http://127.0.0.1:$LAYA_PORT/health" || die "laya-serve did not become healthy (journalctl -u pii-router-laya)"
+else
+  # No unit file at all: pii-router.service Wants= Laya, which would otherwise start it.
+  systemctl disable --now pii-router-laya.service >/dev/null 2>&1 || true
+  rm -f /etc/systemd/system/pii-router-laya.service
+  systemctl daemon-reload
+  systemctl enable pii-router.service >/dev/null
+fi
 systemctl restart pii-router.service
 PORT="${PII_ROUTER_PORT:-4100}"; HOST="${PII_ROUTER_HOST:-127.0.0.1}"
 # Probe the address the router is bound to: agentgateway-setup.sh binds the Docker
