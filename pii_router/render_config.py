@@ -2,9 +2,13 @@
 
     python -m pii_router.render_config /etc/pii-router/config.yaml
 
-Reads OLLAMA_MODEL, OLLAMA_BASE_URL, NVIDIA_MODEL, NVIDIA_BASE_URL from the
-environment. Secrets are NOT written into the file: LiteLLM resolves
-``os.environ/NAME`` at runtime from the systemd EnvironmentFile.
+Reads OLLAMA_MODEL and OLLAMA_BASE_URL for the local backend. The cloud backend is
+CLOUD_BASE_URL + CLOUD_MODEL (key CLOUD_API_KEY) when set, e.g. the customer's
+Vast GPU; otherwise NVIDIA_BASE_URL + NVIDIA_MODEL (key NVIDIA_API_KEY), which is
+what AgentGateway uses. FALLBACK_BASE_URL + FALLBACK_MODEL (key FALLBACK_API_KEY)
+add the backend non-PII traffic uses while the cloud backend is down.
+Secrets are NOT written into the file: LiteLLM resolves ``os.environ/NAME`` at
+runtime from the systemd EnvironmentFile.
 
 The config must live OUTSIDE the directory holding the ``pii_router`` package:
 LiteLLM loads a callback that sits next to its config as a loose file, which
@@ -19,28 +23,48 @@ import os
 import sys
 
 PUBLIC = "pii-router"
-CLOUD = "nvidia-cloud"
+CLOUD = "cloud"
+FALLBACK = "cloud-fallback"
 LOCAL = "ollama-local"
+NVIDIA_BASE = "https://integrate.api.nvidia.com/v1"
+NVIDIA_DEFAULT_MODEL = "nvidia/nemotron-3.5-super-vl-120b-a12b"
+
+
+def _cloud_params(env) -> dict:
+    custom = env.get("CLOUD_BASE_URL", "").strip()
+    if custom:
+        model, base, key = env.get("CLOUD_MODEL", "").strip(), custom, "CLOUD_API_KEY"
+        if not model:
+            raise SystemExit("CLOUD_MODEL is required with CLOUD_BASE_URL")
+    else:
+        model = env.get("NVIDIA_MODEL", NVIDIA_DEFAULT_MODEL).strip()
+        base, key = env.get("NVIDIA_BASE_URL", NVIDIA_BASE), "NVIDIA_API_KEY"
+    return {"model": f"openai/{model}", "api_base": base.rstrip("/"), "api_key": f"os.environ/{key}"}
 
 
 def build(env=os.environ) -> dict:
     ollama_model = env.get("OLLAMA_MODEL", "").strip()
-    nvidia_model = env.get("NVIDIA_MODEL", "nvidia/nemotron-3.5-super-vl-120b-a12b").strip()
     if not ollama_model:
         raise SystemExit("OLLAMA_MODEL is required (the local model PII requests are routed to)")
     ollama_base = env.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
-    nvidia_base = env.get("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1").rstrip("/")
 
     local_params = {"model": f"openai/{ollama_model}", "api_base": f"{ollama_base}/v1", "api_key": "ollama"}
+    model_list = [
+        # The public name points at LOCAL: if the hook is not loaded, nothing reaches the cloud.
+        {"model_name": PUBLIC, "litellm_params": dict(local_params)},
+        {"model_name": LOCAL, "litellm_params": dict(local_params)},
+        {"model_name": CLOUD, "litellm_params": _cloud_params(env)},
+    ]
+    fallback_base = env.get("FALLBACK_BASE_URL", "").strip()
+    if fallback_base:
+        fallback_model = env.get("FALLBACK_MODEL", "").strip()
+        if not fallback_model:
+            raise SystemExit("FALLBACK_MODEL is required with FALLBACK_BASE_URL")
+        model_list.append({"model_name": FALLBACK, "litellm_params": {
+            "model": f"openai/{fallback_model}", "api_base": fallback_base.rstrip("/"),
+            "api_key": "os.environ/FALLBACK_API_KEY"}})
     return {
-        "model_list": [
-            # The public name points at LOCAL: if the hook is not loaded, nothing reaches the cloud.
-            {"model_name": PUBLIC, "litellm_params": dict(local_params)},
-            {"model_name": LOCAL, "litellm_params": dict(local_params)},
-            {"model_name": CLOUD, "litellm_params": {
-                "model": f"openai/{nvidia_model}", "api_base": nvidia_base,
-                "api_key": "os.environ/NVIDIA_API_KEY"}},
-        ],
+        "model_list": model_list,
         "litellm_settings": {
             "callbacks": "pii_router.hook.proxy_handler_instance",
             # Agents send provider-specific params; the other backend may reject them.

@@ -26,6 +26,10 @@ class Unit:
     key: str            # sha256 of role + content; never logged with the content
     text: str
     has_opaque_media: bool  # image/audio/file parts we cannot inspect
+    # True for the current turn: the last user message and everything after it
+    # (the agent's tool calls and their results). Decides whether a local route
+    # is caused by this turn or only by earlier history. Not part of the key.
+    latest: bool = True
 
 
 def _part_text(part) -> tuple[str, bool]:
@@ -59,7 +63,10 @@ def _content_text(content) -> tuple[str, bool]:
 
 def message_units(messages) -> list[Unit]:
     units: list[Unit] = []
-    for message in messages or []:
+    messages = list(messages or [])
+    last_user = max((i for i, m in enumerate(messages)
+                     if isinstance(m, dict) and m.get("role") == "user"), default=-1)
+    for index, message in enumerate(messages):
         if not isinstance(message, dict) or message.get("role") not in SCANNED_ROLES:
             continue
         text, opaque = _content_text(message.get("content"))
@@ -73,7 +80,7 @@ def message_units(messages) -> list[Unit]:
         digest = hashlib.sha256(
             (str(message.get("role")) + "\x00" + text + ("\x00media" if opaque else "")).encode("utf-8", "replace")
         ).hexdigest()
-        units.append(Unit(key=digest, text=text, has_opaque_media=opaque))
+        units.append(Unit(key=digest, text=text, has_opaque_media=opaque, latest=index >= last_user))
     return units
 
 

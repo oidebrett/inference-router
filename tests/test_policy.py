@@ -147,7 +147,7 @@ def test_hook_cannot_be_bypassed_by_naming_the_cloud_model():
 
 def test_hook_sends_clean_traffic_to_cloud():
     hook = PiiRouterHook(router=Router(FakeLaya()), env={})
-    assert _run(hook, {"model": "pii-router", "messages": [user("Explain TCP")]})["model"] == "nvidia-cloud"
+    assert _run(hook, {"model": "pii-router", "messages": [user("Explain TCP")]})["model"] == "cloud"
 
 
 def test_hook_fails_closed_on_router_bug():

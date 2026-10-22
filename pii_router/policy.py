@@ -1,4 +1,4 @@
-"""Routing decision: LOCAL (Ollama) or CLOUD (NVIDIA) for one chat request.
+"""Routing decision: LOCAL (Ollama) or CLOUD (NVIDIA / a Vast GPU) for one chat request.
 
 Pure logic, no LiteLLM — so it can be tested directly. The rule is a union:
 a message is PII if ANY deterministic detector fires OR Laya's yes-probability
@@ -22,6 +22,14 @@ from .extract import Unit, chunks, message_units
 
 LOCAL = "local"
 CLOUD = "cloud"
+
+# Why a request went local, so the caller can tell whether a fresh context
+# would go back to the cloud (only for HISTORY).
+CURRENT_TURN = "current-turn"   # PII in the latest turn
+HISTORY = "history"             # PII only in earlier messages (sticky)
+FAIL_CLOSED = "fail-closed"     # nothing proven PII, but it could not be cleared
+
+MEDIA = "opaque_media"
 
 # Wording matters a lot: the bare "Does this contain PII?" caught 3/12 in the
 # 2026-10-04 spike; this descriptive form caught 8/12 on its own and 12/12
@@ -83,6 +91,30 @@ class Decision:
     # whether agent memory (e.g. OpenClaw memory-core / MEMORY.md) re-injects PII
     # from earlier sessions through the system prompt.
     system_hits: list[str] = field(default_factory=list)
+    pii_current: bool = False
+    pii_history: bool = False
+    fail_closed: bool = False
+
+    @property
+    def local_reason(self) -> str | None:
+        """CURRENT_TURN beats FAIL_CLOSED beats HISTORY: say HISTORY only when a
+        fresh context really would be cleared for the cloud."""
+        if self.route != LOCAL:
+            return None
+        if self.pii_current:
+            return CURRENT_TURN
+        if self.fail_closed or not self.pii_history:
+            return FAIL_CLOSED
+        return HISTORY
+
+    def flag(self, unit: Unit, unit_reasons) -> None:
+        """Record a flagged unit as current-turn PII, history, or fail-closed media."""
+        if not unit.latest:
+            self.pii_history = True
+        elif set(unit_reasons) <= {MEDIA}:
+            self.fail_closed = True  # an image in this turn: not known to be PII
+        else:
+            self.pii_current = True
 
     def log_fields(self) -> dict:
         """What the decision log may contain: never message text."""
@@ -95,6 +127,7 @@ class Decision:
             "laya_chunks": self.laya_chunks,
             "elapsed_ms": round(self.elapsed_ms, 1),
             "system_hits": self.system_hits,
+            "local_reason": self.local_reason,
         }
 
 
@@ -143,6 +176,7 @@ class Router:
                 if cached[0]:
                     reasons.update(cached[1])
                     reasons.add("sticky")
+                    decision.flag(unit, cached[1])
                 continue
             pending.append(unit)
         decision.scanned_units = len(pending)
@@ -152,7 +186,7 @@ class Router:
         for unit in pending:
             hits = detect(unit.text)
             if unit.has_opaque_media and s.media_route == LOCAL:
-                hits = hits + ["opaque_media"]
+                hits = hits + [MEDIA]
             unit_hits[unit.key] = hits
 
         # Laya pass over units the detectors did not already settle.
@@ -170,6 +204,7 @@ class Router:
         if len(plan) > s.max_chunks:
             if s.oversize_route == LOCAL:
                 reasons.add("oversize_unscanned")
+                decision.fail_closed = True
             plan = plan[: s.max_chunks]
         chunks_scored: dict[str, int] = {}
         for key, _ in plan:
@@ -186,12 +221,14 @@ class Router:
             except Exception:  # noqa: BLE001 — any scorer failure fails closed
                 laya_failed = True
                 reasons.add("laya_unavailable")
+                decision.fail_closed = True
 
         for unit in pending:
             hits = unit_hits[unit.key]
             if hits:
                 self.cache.put(unit.key, (True, tuple(hits)))
                 reasons.update(hits)
+                decision.flag(unit, hits)
                 continue
             if laya_failed or unit.key not in laya_scores:
                 # Not cached: a later turn retries once Laya is back / budget allows.
@@ -200,6 +237,7 @@ class Router:
             if laya_scores[unit.key] >= s.threshold:
                 self.cache.put(unit.key, (True, ("laya",)))  # PII in any part is enough
                 reasons.add("laya")
+                decision.flag(unit, ("laya",))
             elif fully_scanned:
                 self.cache.put(unit.key, (False, ()))
             # A partly scanned unit is never cached as clean.

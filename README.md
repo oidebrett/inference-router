@@ -8,7 +8,7 @@ this router as a NemoClaw "custom" provider.
 ```
 sandbox → inference.local → OpenShell gateway → pii-router (127.0.0.1:4100/v1, model "pii-router")
                                                   ├─ PII     → Ollama  (OLLAMA_MODEL, e.g. qwen3.5:4b)
-                                                  └─ not PII → NVIDIA  (NVIDIA_MODEL)
+                                                  └─ not PII → NVIDIA  (NVIDIA_MODEL), or a GPU with NVIDIA as fallback
 ```
 
 ## How a request is decided
@@ -39,6 +39,36 @@ The bare question "does this contain PII?" caught only 3/12 — the wording in
 
 Parked follow-up: a **Masked** mode that pseudonymises identifiers and keeps those conversations
 on NVIDIA instead of going local — see [`DESIGN-masked-mode.md`](DESIGN-masked-mode.md).
+
+## Where a reply went, and why (2026-10-22)
+
+Every reply carries `x-pii-route: local|cloud|fallback` and `x-pii-reason:
+current-turn|history|fail-closed|clean` headers (also on tool-call-only replies, which
+have no text to mark). Local text replies end with a marker:
+
+| Marker | Reason | Would a fresh context go to the cloud? |
+|---|---|---|
+| ` †`  | PII in the current turn (the last user message and everything after it) | No |
+| ` ††` | PII only in earlier messages (sticky history) | **Yes**: start a new conversation |
+| ` †!` | Could not be cleared (Laya down, oversize, image, cloud down with no fallback) | Not necessarily |
+
+The router strips its own markers from assistant history before deciding and forwarding.
+`PII_ROUTER_LOCAL_MARKER=` (empty) turns all markers off; `PII_ROUTER_HISTORY_MARKER` and
+`PII_ROUTER_FAILCLOSED_MARKER` change the other two.
+
+## Cloud backend and fallback
+
+The cloud backend is NVIDIA by default (AgentGateway). For **PrivateInference** it is the
+customer's own GPU: `CLOUD_BASE_URL` + `CLOUD_MODEL` (+ `CLOUD_API_KEY`). With an
+`NVIDIA_API_KEY` as well, NVIDIA becomes the fallback: the router probes
+`CLOUD_BASE_URL/models` (cached `PII_ROUTER_CLOUD_HEALTH_INTERVAL`, default 15 s) and sends
+clean traffic to NVIDIA while the GPU is down. A failed GPU call marks it down at once; that
+one request fails (retries stay off), the next is re-routed. PII never goes to either.
+
+```bash
+sudo OLLAMA_MODEL=qwen3.5:4b CLOUD_BASE_URL=https://gpu.example/v1 CLOUD_MODEL=qwen3.8-27b \
+     CLOUD_API_KEY=... NVIDIA_API_KEY=nvapi-... scripts/pii-router/install.sh
+```
 
 ## Install (on the gateway host)
 

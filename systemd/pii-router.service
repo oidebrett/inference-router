@@ -1,5 +1,5 @@
 [Unit]
-Description=PII router - LiteLLM proxy (routes PII to local Ollama, the rest to NVIDIA)
+Description=PII router - LiteLLM proxy (routes PII to local Ollama, the rest to the cloud backend)
 After=network-online.target pii-router-laya.service
 Wants=network-online.target pii-router-laya.service
 

@@ -3,6 +3,9 @@ import json, sys, time, uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse, JSONResponse
 NAME = sys.argv[1]; PORT = int(sys.argv[2]); app = FastAPI()
+@app.get("/v1/models")
+async def models():
+    return {"object": "list", "data": [{"id": NAME, "object": "model"}]}
 @app.post("/v1/chat/completions")
 async def cc(req: Request):
     body = await req.json(); text = f"answered-by-{NAME} model={body.get('model')}"
