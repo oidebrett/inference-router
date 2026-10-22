@@ -247,3 +247,12 @@ def test_render_requires_models_for_custom_backends():
         render_config.build({"OLLAMA_MODEL": "m", "CLOUD_BASE_URL": "https://gpu/v1"})
     with pytest.raises(SystemExit):
         render_config.build({"OLLAMA_MODEL": "m", "FALLBACK_BASE_URL": "https://n/v1"})
+
+
+def test_local_model_thinking_is_off_by_default_and_configurable():
+    m = _names(render_config.build({"OLLAMA_MODEL": "qwen3.5:4b"}))
+    assert m["ollama-local"]["extra_body"] == {"reasoning_effort": "none"}
+    assert m["pii-router"]["extra_body"] == {"reasoning_effort": "none"}
+    assert "extra_body" not in m["cloud"]
+    m = _names(render_config.build({"OLLAMA_MODEL": "m", "PII_ROUTER_LOCAL_REASONING_EFFORT": ""}))
+    assert "extra_body" not in m["ollama-local"]

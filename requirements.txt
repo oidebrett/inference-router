@@ -2,3 +2,6 @@
 # from the CPU-only index by install.sh, so a VPS does not pull multi-GB CUDA wheels.
 laya[serve]==0.3.26
 litellm[proxy]==1.104.0
+# LiteLLM 1.104's auth error handler imports prisma even with no database configured;
+# without it a request with no key gets 500 instead of 401 (still rejected). 2026-10-22.
+prisma==0.15.0

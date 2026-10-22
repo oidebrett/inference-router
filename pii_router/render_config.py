@@ -49,6 +49,13 @@ def build(env=os.environ) -> dict:
     ollama_base = env.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
 
     local_params = {"model": f"openai/{ollama_model}", "api_base": f"{ollama_base}/v1", "api_key": "ollama"}
+    # Thinking models (qwen3.5) on CPU can spend minutes reasoning before the first
+    # answer token: 2,000 tokens / ~5 min and no answer vs 3 s with "none" (Oracle
+    # arm64, 2026-10-22). Ollama's OpenAI endpoint honours reasoning_effort; it
+    # ignores think:false. PII_ROUTER_LOCAL_REASONING_EFFORT= (empty) leaves it alone.
+    effort = env.get("PII_ROUTER_LOCAL_REASONING_EFFORT", "none").strip()
+    if effort:
+        local_params["extra_body"] = {"reasoning_effort": effort}
     model_list = [
         # The public name points at LOCAL: if the hook is not loaded, nothing reaches the cloud.
         {"model_name": PUBLIC, "litellm_params": dict(local_params)},

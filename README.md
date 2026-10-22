@@ -95,6 +95,7 @@ The local model must support **tool calling** or agent turns routed to it fail.
 | `PII_ROUTER_MEDIA_ROUTE` | `local` | route for images/audio/files (cannot be inspected) |
 | `PII_ROUTER_LAYA_TIMEOUT` | `15` | seconds |
 | `PII_ROUTER_LAYA_MODEL` | `english` | `multilingual` for non-English traffic |
+| `PII_ROUTER_LOCAL_REASONING_EFFORT` | `none` | sent to Ollama as `reasoning_effort`; `none` turns thinking off (qwen3.5:4b on CPU: 3 s vs ~5 min). Empty = model default |
 
 ## Tests
 
