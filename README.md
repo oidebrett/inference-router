@@ -119,3 +119,11 @@ PY=/path/to/venv/bin/python scripts/pii-router/tests/e2e.sh   # real Laya + Lite
 `pii_router/auth.py` is LiteLLM's `custom_auth`: the master key (`LITELLM_MASTER_KEY`) is the only
 valid key, and a wrong or missing key gets `401 Invalid API key`. (Without it LiteLLM, which runs
 here with no database, answers a wrong key with `400 No connected db`.)
+
+## Detection limits
+
+Pattern detectors (email, phone, IBAN, card, PPSN/NINO/SSN, passport, date of birth) are reliable. A name
+together with health, salary or HR details is judged by Laya alone, which is deterministic but sensitive
+to phrasing: "on sick leave for depression; plan her return-to-work" scores 0.80, "off with depression,
+suggest one step" 0.30 (missed at the 0.4 threshold); "Name three prime numbers" scores 0.70 (false alarm).
+Treat PII routing as best effort (live test 2026-10-23, manidae-cloud docs/private-inference-plan.md §12).
