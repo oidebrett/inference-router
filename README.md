@@ -104,6 +104,8 @@ The local model must support **tool calling** or agent turns routed to it fail.
 | `PII_ROUTER_LAYA_TIMEOUT` | `15` | seconds |
 | `PII_ROUTER_LAYA_MODEL` | `english` | `multilingual` for non-English traffic |
 | `PII_ROUTER_LOCAL_REASONING_EFFORT` | `none` | sent to Ollama as `reasoning_effort`; `none` turns thinking off (qwen3.5:4b on CPU: 3 s vs ~5 min). Empty = model default |
+| `PII_ROUTER_CLOUD_REASONING_EFFORT` | `none` | only with `CLOUD_BASE_URL` (a vLLM GPU): sent as `reasoning_effort`; `none` = no thinking (Qwen3.8-27B: 0.5 s vs ~5 s). A caller's own `reasoning_effort` still wins. Empty = model default |
+| `PII_ROUTER_PUBLIC_MODELS` | `pii-router` | comma-separated names callers use; each routes like `pii-router`, and `GET /v1/models` lists only these. `pii-router` always works |
 
 ## Tests
 
@@ -111,3 +113,9 @@ The local model must support **tool calling** or agent turns routed to it fail.
 python -m pytest scripts/pii-router/tests          # unit tests (needs litellm + httpx)
 PY=/path/to/venv/bin/python scripts/pii-router/tests/e2e.sh   # real Laya + LiteLLM, fake backends
 ```
+
+## Authentication
+
+`pii_router/auth.py` is LiteLLM's `custom_auth`: the master key (`LITELLM_MASTER_KEY`) is the only
+valid key, and a wrong or missing key gets `401 Invalid API key`. (Without it LiteLLM, which runs
+here with no database, answers a wrong key with `400 No connected db`.)

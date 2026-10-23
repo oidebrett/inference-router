@@ -12,7 +12,9 @@
 # passes its configured default explicitly), OLLAMA_BASE_URL
 #           (default http://127.0.0.1:11434), PII_ROUTER_HOST (127.0.0.1), PII_ROUTER_PORT (4100),
 #           LITELLM_MASTER_KEY (the router's client key; generated once if not given),
-#           LAYA_PORT (4101), PII_ROUTER_LAYA_THRESHOLD (0.4).
+#           LAYA_PORT (4101), PII_ROUTER_LAYA_THRESHOLD (0.4),
+#           PII_ROUTER_PUBLIC_MODELS (pii-router; the names /v1/models lists),
+#           PII_ROUTER_CLOUD_REASONING_EFFORT (none; GPU thinking, only with CLOUD_BASE_URL).
 # PII_ROUTER_MODE=off (PrivateInference without PII routing): no PII check, no local model.
 #           OLLAMA_MODEL is not needed, Laya/torch are not installed and its unit is removed;
 #           everything goes to the cloud backend (or the NVIDIA fallback while it is down).
@@ -118,6 +120,7 @@ PII_ROUTER_HOST=${PII_ROUTER_HOST:-127.0.0.1}
 PII_ROUTER_PORT=${PII_ROUTER_PORT:-4100}
 OLLAMA_MODEL=${OLLAMA_MODEL:-}
 PII_ROUTER_MODE=$PII_MODE
+PII_ROUTER_PUBLIC_MODELS=${PII_ROUTER_PUBLIC_MODELS:-pii-router}
 ENVEOF
 chown root:pii-router "$ENV_FILE.new" && chmod 0640 "$ENV_FILE.new" && mv "$ENV_FILE.new" "$ENV_FILE"
 
@@ -127,6 +130,8 @@ OLLAMA_MODEL="${OLLAMA_MODEL:-}" NVIDIA_MODEL="$NVIDIA_MODEL" PII_ROUTER_MODE="$
   CLOUD_BASE_URL="${CLOUD_BASE_URL:-}" CLOUD_MODEL="${CLOUD_MODEL:-}" \
   FALLBACK_BASE_URL="$FALLBACK_BASE_URL" FALLBACK_MODEL="$FALLBACK_MODEL" FALLBACK2_MODEL="$FALLBACK2_MODEL" \
   PII_ROUTER_LOCAL_REASONING_EFFORT="${PII_ROUTER_LOCAL_REASONING_EFFORT-none}" \
+  PII_ROUTER_CLOUD_REASONING_EFFORT="${PII_ROUTER_CLOUD_REASONING_EFFORT-none}" \
+  PII_ROUTER_PUBLIC_MODELS="${PII_ROUTER_PUBLIC_MODELS:-pii-router}" \
   PYTHONPATH="$PREFIX" "$PREFIX/venv/bin/python" -m pii_router.render_config "$ETC/config.yaml"
 chown root:pii-router "$ETC/config.yaml" && chmod 0640 "$ETC/config.yaml"
 

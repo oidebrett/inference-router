@@ -7,6 +7,11 @@ CLOUD_BASE_URL + CLOUD_MODEL (key CLOUD_API_KEY) when set, e.g. the customer's
 Vast GPU; otherwise NVIDIA_BASE_URL + NVIDIA_MODEL (key NVIDIA_API_KEY), which is
 what AgentGateway uses. FALLBACK_BASE_URL + FALLBACK_MODEL (key FALLBACK_API_KEY)
 add the backend non-PII traffic uses while the cloud backend is down.
+PII_ROUTER_PUBLIC_MODELS (comma-separated, default pii-router) are the names
+callers use; each points where the public model does and /v1/models lists only
+these. With CLOUD_BASE_URL (a vLLM GPU), PII_ROUTER_CLOUD_REASONING_EFFORT
+(default none) switches thinking off: the same answer in ~0.5 s instead of ~5 s
+on Qwen3.8-27B (2026-10-23); set it empty to let the model think.
 Secrets are NOT written into the file: LiteLLM resolves ``os.environ/NAME`` at
 runtime from the systemd EnvironmentFile.
 
@@ -40,7 +45,22 @@ def _cloud_params(env) -> dict:
     else:
         model = env.get("NVIDIA_MODEL", NVIDIA_DEFAULT_MODEL).strip()
         base, key = env.get("NVIDIA_BASE_URL", NVIDIA_BASE), "NVIDIA_API_KEY"
-    return {"model": f"openai/{model}", "api_base": base.rstrip("/"), "api_key": f"os.environ/{key}"}
+    params = {"model": f"openai/{model}", "api_base": base.rstrip("/"), "api_key": f"os.environ/{key}"}
+    effort = env.get("PII_ROUTER_CLOUD_REASONING_EFFORT", "none").strip() if custom else ""
+    if effort:
+        params["extra_body"] = {"reasoning_effort": effort}
+    return params
+
+
+def _public_names(env) -> list:
+    names = [n.strip() for n in (env.get("PII_ROUTER_PUBLIC_MODELS") or PUBLIC).split(",")]
+    return [n for n in dict.fromkeys(names) if n]
+
+
+def _public_entries(env, params) -> list:
+    """The public name(s); pii-router is always kept so existing clients keep working."""
+    names = [PUBLIC] + [n for n in _public_names(env) if n != PUBLIC]
+    return [{"model_name": n, "litellm_params": dict(params)} for n in names]
 
 
 def build(env=os.environ) -> dict:
@@ -62,7 +82,7 @@ def build(env=os.environ) -> dict:
         local_params["extra_body"] = {"reasoning_effort": effort}
     model_list = [
         # The public name points at LOCAL: if the hook is not loaded, nothing reaches the cloud.
-        {"model_name": PUBLIC, "litellm_params": dict(local_params)},
+        *_public_entries(env, local_params),
         {"model_name": LOCAL, "litellm_params": dict(local_params)},
         {"model_name": CLOUD, "litellm_params": _cloud_params(env)},
     ]
@@ -103,7 +123,11 @@ def _settings(model_list) -> dict:
             "num_retries": 0,  # a retry must not silently move a request to the other backend
         },
         "router_settings": router,
-        "general_settings": {"master_key": "os.environ/LITELLM_MASTER_KEY"},
+        # custom_auth checks the master key itself: 401 for a wrong key (LiteLLM's own
+        # check says "400 No connected db" without a database) and a /models list of
+        # the public names only. See pii_router/auth.py.
+        "general_settings": {"master_key": "os.environ/LITELLM_MASTER_KEY",
+                             "custom_auth": "pii_router.auth.user_api_key_auth"},
     }
 
 
@@ -113,7 +137,7 @@ def _build_unchecked(env) -> dict:
     fallback while the cloud is down."""
     cloud = _cloud_params(env)
     model_list = [
-        {"model_name": PUBLIC, "litellm_params": dict(cloud)},
+        *_public_entries(env, cloud),
         {"model_name": CLOUD, "litellm_params": dict(cloud)},
     ] + _fallback_models(env)
     return {"model_list": model_list, **_settings(model_list)}

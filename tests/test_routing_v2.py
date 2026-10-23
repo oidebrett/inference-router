@@ -237,7 +237,7 @@ def test_render_vast_cloud_with_nvidia_fallback():
         "OLLAMA_MODEL": "qwen3.5:4b", "CLOUD_BASE_URL": "https://gpu.ex/v1/", "CLOUD_MODEL": "qwen3.8-27b",
         "FALLBACK_BASE_URL": "https://integrate.api.nvidia.com/v1", "FALLBACK_MODEL": "nvidia/x"}))
     assert m["cloud"] == {"model": "openai/qwen3.8-27b", "api_base": "https://gpu.ex/v1",
-                          "api_key": "os.environ/CLOUD_API_KEY"}
+                          "api_key": "os.environ/CLOUD_API_KEY", "extra_body": {"reasoning_effort": "none"}}
     assert m["cloud-fallback"]["api_key"] == "os.environ/FALLBACK_API_KEY"
 
 
@@ -347,3 +347,50 @@ def test_systemd_unit_hides_litellm_docs_and_admin_ui():
     unit = (pathlib.Path(__file__).resolve().parents[1] / "systemd/pii-router.service").read_text()
     for line in ("NO_DOCS=True", "NO_REDOC=True", "DISABLE_ADMIN_UI=True"):
         assert line in unit
+
+
+# --- auth, public names, GPU thinking (2026-10-23) ----------------------------------------
+
+def test_gpu_thinking_is_off_by_default_but_not_for_nvidia():
+    gpu = {"PII_ROUTER_MODE": "off", "CLOUD_BASE_URL": "https://gpu/v1", "CLOUD_MODEL": "g",
+           "FALLBACK_BASE_URL": "https://nv/v1", "FALLBACK_MODEL": "nv"}
+    m = _names(render_config.build(gpu))
+    assert m["cloud"]["extra_body"] == {"reasoning_effort": "none"}
+    assert "extra_body" not in m["cloud-fallback"]
+    assert "extra_body" not in _names(render_config.build({**gpu, "PII_ROUTER_CLOUD_REASONING_EFFORT": ""}))["cloud"]
+    # AgentGateway: the cloud is NVIDIA itself, left alone
+    assert "extra_body" not in _names(render_config.build({"OLLAMA_MODEL": "m"}))["cloud"]
+
+
+def test_public_names_point_where_pii_router_does():
+    for env in ({"OLLAMA_MODEL": "m"}, {"PII_ROUTER_MODE": "off", "CLOUD_BASE_URL": "https://gpu/v1", "CLOUD_MODEL": "g"}):
+        m = _names(render_config.build({**env, "PII_ROUTER_PUBLIC_MODELS": "default"}))
+        assert m["default"] == m["pii-router"]
+    assert "default" not in _names(render_config.build({"OLLAMA_MODEL": "m"}))
+
+
+def test_config_uses_the_custom_auth():
+    cfg = render_config.build({"OLLAMA_MODEL": "m"})
+    assert cfg["general_settings"]["custom_auth"] == "pii_router.auth.user_api_key_auth"
+
+
+def test_auth_rejects_wrong_or_missing_keys_with_401():
+    import pytest
+    from litellm.proxy._types import ProxyException
+    from pii_router import auth
+    env = {"LITELLM_MASTER_KEY": "sk-pi-right"}
+    for key in ("sk-pi-wrong", "", None, "Bearer sk-pi-wrong"):
+        with pytest.raises(ProxyException) as err:
+            auth.check(key, "/v1/chat/completions", env)
+        assert str(err.value.code) == "401"
+    with pytest.raises(ProxyException):
+        auth.check("sk-pi-right", "/v1/models", {})  # no master key configured: nothing is valid
+
+
+def test_auth_scopes_only_the_models_list():
+    from pii_router import auth
+    env = {"LITELLM_MASTER_KEY": "sk-pi-right", "PII_ROUTER_PUBLIC_MODELS": "default"}
+    assert auth.check("Bearer sk-pi-right", "/v1/models", env).models == ["default"]
+    chat = auth.check("sk-pi-right", "/v1/chat/completions", env)
+    assert chat.models == [] and chat.user_role is not None
+    assert auth.check("sk-pi-right", "/models", {"LITELLM_MASTER_KEY": "sk-pi-right"}).models == ["pii-router"]

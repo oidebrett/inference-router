@@ -8,7 +8,7 @@ async def models():
     return {"object": "list", "data": [{"id": NAME, "object": "model"}]}
 @app.post("/v1/chat/completions")
 async def cc(req: Request):
-    body = await req.json(); text = f"answered-by-{NAME} model={body.get('model')}"
+    body = await req.json(); text = f"answered-by-{NAME} model={body.get('model')} effort={body.get('reasoning_effort')}"
     if "fail" in str(body.get("model")):  # simulate NVIDIA's "Failed to generate completions"
         return JSONResponse({"message": "Failed to generate completions", "code": 500}, status_code=500)
     if body.get("stream"):
