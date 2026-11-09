@@ -328,5 +328,17 @@ def test_residual_check_sees_masked_text_without_placeholders():
 
     data = pre(hook(laya=Recording()), [user("note to ann.kelly@acme.ie: we call back on +353 87 123 4567")])
     assert data["model"] == "cloud"
-    assert seen == ["note to: we call back on"]
+    assert seen == ["note to an email address: we call back on a phone number"]
     assert PLACEHOLDER.search(sent_text(data))  # the cloud still gets placeholders
+
+
+def test_any_openai_compatible_endpoint_as_cloud_backend():
+    def cloud(env):
+        cfg = render_config.build({"PII_ROUTER_MODE": "masked", **env})
+        return next(m["litellm_params"] for m in cfg["model_list"] if m["model_name"] == "cloud")
+    openrouter = cloud({"CLOUD_BASE_URL": "https://openrouter.ai/api/v1", "CLOUD_MODEL": "openai/gpt-4o-mini"})
+    assert openrouter["api_base"] == "https://openrouter.ai/api/v1"
+    assert openrouter["model"] == "openai/openai/gpt-4o-mini" and openrouter["api_key"] == "os.environ/CLOUD_API_KEY"
+    assert "extra_body" not in openrouter  # hosted API: no reasoning_effort by default
+    vast = cloud({"CLOUD_BASE_URL": "http://203.0.113.5:8000/v1", "CLOUD_MODEL": "qwen"})
+    assert vast["extra_body"] == {"reasoning_effort": "none"}  # self-hosted GPU unchanged

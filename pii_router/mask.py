@@ -147,22 +147,32 @@ class MaskSession:
         return masked
 
 
-_CHECK_STRIP = re.compile(r"[ \t]*<[A-Z][A-Z_]*_[0-9a-f]{8,16}>")
+_CHECK_PLACEHOLDER = re.compile(r"<([A-Z][A-Z_]*)_[0-9a-f]{8,16}>")
+_CHECK_WORDS = {
+    "EMAIL": "an email address", "PHONE": "a phone number", "IBAN": "an account number",
+    "PAYMENT_CARD": "a card number", "US_SSN": "an ID number", "UK_NINO": "an ID number",
+    "IE_PPSN": "an ID number", "PASSPORT": "an ID number", "DATE_OF_BIRTH": "a date",
+}
 
 
 def for_residual_check(masked_messages: list) -> list:
-    """The masked messages with placeholders REMOVED, for the residual (Laya) check.
+    """The masked messages with each placeholder replaced by a plain phrase
+    ("an email address"), for the residual (Laya) check only.
 
     The question there is "is anything personal left besides the identifiers we
     already hid?". Laya reads a placeholder itself as personal data, and its score
     swings with the placeholder's random hex (the same sentence scored 0.22 and 0.51
-    live on 2026-11-09). With them removed, maskable requests scored 0.04-0.13 while
-    a name with health or salary details still scored 0.68-0.80. Only used for the
-    check; the cloud still receives the placeholders."""
+    live on 2026-11-09). Measured on Oracle with 8 maskable and 4 personal texts:
+    placeholders kept -> maskable up to 0.93; removed -> up to 0.40 (at the
+    threshold); "[REDACTED]" -> up to 0.70; plain phrases -> up to 0.28, while a name
+    with health, salary or address details stayed at 0.68-0.82. The cloud still
+    receives the placeholders."""
     out = copy.deepcopy(list(masked_messages or []))
 
     def strip(text):
-        return _CHECK_STRIP.sub("", text) if isinstance(text, str) else text
+        if not isinstance(text, str):
+            return text
+        return _CHECK_PLACEHOLDER.sub(lambda m: _CHECK_WORDS.get(m.group(1), "a value"), text)
 
     for message in out:
         if not isinstance(message, dict):
