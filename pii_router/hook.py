@@ -48,6 +48,7 @@ from collections import OrderedDict
 
 from litellm.integrations.custom_logger import CustomLogger
 
+from .audit import AuditLog
 from .health import CloudHealth
 from .laya_client import LayaHttpScorer
 from .mask import MaskSession, StreamRestorer, add_system_note, restore_json_text, restore_text
@@ -119,6 +120,7 @@ class PiiRouterHook(CustomLogger):
             # Still safe, but placeholders change after every restart.
             log.warning("pii-router: PII_ROUTER_MASK_SECRET is not set; using a per-process secret")
         self.mask_secret = secret.encode("utf-8") if secret else secrets.token_bytes(32)
+        self.audit = AuditLog.from_env(env) if self.mode == MASKED else None
         # placeholder maps of requests in flight: id -> (created, mapping). Never logged.
         self._maps: OrderedDict[str, tuple[float, dict]] = OrderedDict()
         self.router = router or Router(LayaHttpScorer.from_env(env), Settings.from_env(env))
@@ -203,7 +205,17 @@ class PiiRouterHook(CustomLogger):
     def _drop_map(self, data) -> None:
         self._maps.pop(self._meta(data).get("pii_router_map") or "", None)
 
-    def _block(self, data, reason: str, fields: dict) -> dict:
+    async def _audit(self, data, entry: dict) -> None:
+        if self.audit is None:
+            return
+        audit_id = self._meta(data).get("pii_router_audit")
+        if not audit_id:
+            audit_id = secrets.token_hex(4)
+            if isinstance(data.get("metadata"), dict):
+                data["metadata"]["pii_router_audit"] = audit_id
+        await asyncio.to_thread(self.audit.write, {"id": audit_id, **entry})
+
+    async def _block(self, data, reason: str, fields: dict) -> dict:
         """Answer with an explanation instead of calling any model. The request's
         messages are replaced, so nothing personal can be forwarded by mistake."""
         data["model"] = self.blocked_model
@@ -214,13 +226,15 @@ class PiiRouterHook(CustomLogger):
         self._set_meta(data, BLOCKED, reason)
         fields.update(route=BLOCKED, block_reason=reason, target=data["model"])
         self._log(fields)
+        await self._audit(data, {"kind": "request", "route": BLOCKED, "reason": reason,
+                                 "masked_types": fields.get("masked_types") or {}})
         return data
 
     async def _route_masked(self, data, call_type, requested):
         fields: dict = {"mode": MASKED, "requested": requested}
         if call_type not in CHAT_CALL_TYPES:
             fields["reasons"] = [f"unsupported_call_type:{call_type}"]
-            return self._block(data, FAIL_CLOSED, fields)
+            return await self._block(data, FAIL_CLOSED, fields)
         try:
             self._strip_markers(data.get("messages"))
             session = MaskSession(self.mask_secret)
@@ -229,7 +243,7 @@ class PiiRouterHook(CustomLogger):
             fields.update(decision.log_fields())
         except Exception as error:  # noqa: BLE001 — fail closed on any bug
             fields.update(reasons=["router_error"], error=type(error).__name__)
-            return self._block(data, FAIL_CLOSED, fields)
+            return await self._block(data, FAIL_CLOSED, fields)
         fields.update(masked_types=dict(sorted(session.counts.items())), masked_values=len(session.mapping))
         if fields["route"] == LOCAL:
             # Personal content left after masking (Laya), opaque media, or not checkable.
@@ -239,13 +253,15 @@ class PiiRouterHook(CustomLogger):
                 self._set_meta(data, LOCAL, reason)
                 fields.update(route=LOCAL, target=data["model"])
                 self._log(fields)
+                await self._audit(data, {"kind": "request", "route": LOCAL, "reason": reason,
+                                         "masked_types": fields.get("masked_types") or {}})
                 return data
-            return self._block(data, reason, fields)
+            return await self._block(data, reason, fields)
         route = CLOUD
         if self.health is not None and not await asyncio.to_thread(self.health.healthy):
             if not self.fallback_model:
                 fields["reasons"] = list(fields.get("reasons") or []) + ["cloud_unavailable"]
-                return self._block(data, "cloud_unavailable", fields)
+                return await self._block(data, "cloud_unavailable", fields)
             route = FALLBACK
         data["messages"] = add_system_note(masked) if session.mapping else masked
         data["model"] = self.cloud_model if route == CLOUD else self.fallback_model
@@ -255,7 +271,15 @@ class PiiRouterHook(CustomLogger):
             data["metadata"]["pii_router_masked"] = len(session.mapping)
         fields.update(route=route, local_reason=None, target=data["model"])
         self._log(fields)
+        # Exactly what is sent: placeholders, never the real values.
+        await self._audit(data, {"kind": "request", "route": route,
+                                 "reason": MASKED if session.mapping else CLEAN, "target": data["model"],
+                                 "masked_types": fields["masked_types"], "messages": data["messages"]})
         return data
+
+    async def _audit_reply(self, data, content, tool_calls) -> None:
+        if self.audit is not None and self._meta(data).get("pii_router_audit"):
+            await self._audit(data, {"kind": "reply", "content": content, "tool_calls": tool_calls})
 
     def _restore_message(self, message, mapping: dict) -> None:
         for attr in ("content", "reasoning_content"):
@@ -343,6 +367,14 @@ class PiiRouterHook(CustomLogger):
         return {"x-pii-route": route, "x-pii-reason": reason if route == LOCAL else CLEAN}
 
     async def async_post_call_success_hook(self, data, user_api_key_dict, response):
+        if self.audit is not None and self._meta(data).get("pii_router_route") in (CLOUD, FALLBACK):
+            try:
+                message = response.choices[0].message
+                calls = [{"name": getattr(c.function, "name", None), "arguments": c.function.arguments}
+                         for c in (getattr(message, "tool_calls", None) or [])]
+                await self._audit_reply(data, getattr(message, "content", None), calls)
+            except (AttributeError, IndexError, TypeError):
+                pass
         mapping = self._peek_map(data)
         if mapping:
             try:
@@ -369,6 +401,21 @@ class PiiRouterHook(CustomLogger):
 
     async def async_post_call_streaming_iterator_hook(self, user_api_key_dict, response, request_data):
         mapping = self._peek_map(request_data)
+        raw: dict = {"text": [], "args": {}}
+        if self.audit is not None and self._meta(request_data).get("pii_router_route") in (CLOUD, FALLBACK):
+            response = self._tap_stream(response, raw)
+            try:
+                if mapping:
+                    async for chunk in self._restore_stream(response, mapping):
+                        yield chunk
+                else:
+                    async for chunk in response:
+                        yield chunk
+            finally:
+                self._drop_map(request_data)
+                calls = [{"name": None, "arguments": "".join(v)} for _, v in sorted(raw["args"].items())]
+                await self._audit_reply(request_data, "".join(raw["text"]), calls)
+            return
         if mapping:
             try:
                 async for chunk in self._restore_stream(response, mapping):
@@ -393,6 +440,22 @@ class PiiRouterHook(CustomLogger):
                     pass
             yield chunk
 
+
+    @staticmethod
+    async def _tap_stream(response, raw: dict):
+        """Record the stream as received (before restore) for the audit log."""
+        async for chunk in response:
+            try:
+                delta = chunk.choices[0].delta
+                if isinstance(getattr(delta, "content", None), str):
+                    raw["text"].append(delta.content)
+                for call in getattr(delta, "tool_calls", None) or []:
+                    piece = getattr(getattr(call, "function", None), "arguments", None)
+                    if isinstance(piece, str):
+                        raw["args"].setdefault(getattr(call, "index", 0) or 0, []).append(piece)
+            except (AttributeError, IndexError, TypeError):
+                pass
+            yield chunk
 
     async def _restore_stream(self, response, mapping: dict):
         """Restore placeholders in streamed content and tool-call argument deltas.

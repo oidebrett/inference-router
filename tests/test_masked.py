@@ -279,3 +279,40 @@ def test_masked_block_config_needs_no_ollama_and_fails_closed():
     assert by_name["pii-router"]["mock_response"]  # hook not loaded -> blocked, never cloud
     assert by_name["pii-blocked"]["mock_response"]
     assert by_name["cloud"]["api_base"].startswith("https://integrate.api.nvidia.com")
+
+
+# --- audit log ----------------------------------------------------------------------
+
+def test_audit_log_holds_placeholders_never_values(tmp_path, capsys):
+    from pii_router import audit
+    path = tmp_path / "audit.jsonl"
+    h = hook(env={"PII_ROUTER_AUDIT": "on", "PII_ROUTER_AUDIT_FILE": str(path)})
+    data = pre(h, [user("mail ann@acme.ie, card 4111 1111 1111 1111")])
+    token = next(iter(h._maps.values()))[1]
+    placeholder = next(k for k, v in token.items() if v == "ann@acme.ie")
+    resp = NS(choices=[NS(message=NS(content=f"Sent to {placeholder}", reasoning_content=None, tool_calls=None))])
+    out = asyncio.run(h.async_post_call_success_hook(data, None, resp))
+    assert out.choices[0].message.content.startswith("Sent to ann@acme.ie")
+    pre(h, [user("Sarah from accounts is on sick leave, mail ann@acme.ie")])  # blocked
+    text = path.read_text()
+    assert "ann@acme.ie" not in text and "4111" not in text and "Sarah" not in text
+    lines = [json.loads(l) for l in text.splitlines()]
+    assert [l["kind"] for l in lines] == ["request", "reply", "request"]
+    assert placeholder in json.dumps(lines[0]["messages"]) and lines[1]["content"] == f"Sent to {placeholder}"
+    assert lines[2]["route"] == "blocked" and "messages" not in lines[2]
+    assert audit.main(["--file", str(path), "-n", "5"]) == 0
+    shown = capsys.readouterr().out
+    assert placeholder in shown and "route=blocked" in shown
+
+
+def test_audit_is_off_by_default(tmp_path):
+    assert hook().audit is None
+
+
+def test_audit_file_is_trimmed(tmp_path):
+    from pii_router.audit import AuditLog
+    log = AuditLog(str(tmp_path / "a.jsonl"), keep=2)
+    for i in range(20):
+        log.write({"kind": "request", "n": i})
+    lines = (tmp_path / "a.jsonl").read_text().splitlines()
+    assert len(lines) <= 8 and json.loads(lines[-1])["n"] == 19

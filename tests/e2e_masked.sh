@@ -13,6 +13,7 @@ trap cleanup EXIT
 PII_ROUTER_MODE=masked NVIDIA_BASE_URL=http://127.0.0.1:18201/v1 NVIDIA_MODEL=echo \
   "$PY" -m pii_router.render_config "$WORK/config.yaml"
 PYTHONPATH="$PWD" PII_ROUTER_MODE=masked PII_ROUTER_RESIDUAL_CHECK=none PII_ROUTER_MASK_SECRET=e2e \
+  PII_ROUTER_AUDIT=on PII_ROUTER_AUDIT_FILE="$WORK/audit.jsonl" \
   LITELLM_MASTER_KEY="$KEY" NVIDIA_API_KEY=fake LITELLM_LOCAL_MODEL_COST_MAP=True \
   "$BIN/litellm" --config "$WORK/config.yaml" --host 127.0.0.1 --port 18200 >"$WORK/litellm.log" 2>&1 & pids+=($!)
 for _ in $(seq 1 90); do curl -sf -o /dev/null http://127.0.0.1:18200/health/liveliness && break; sleep 1; done
@@ -58,6 +59,9 @@ echo "$out" | grep -q "seen: direct $EMAIL" && pass "naming the cloud model stil
 if grep -qE "ann\.kelly|4111" "$WORK/received.jsonl"; then bad "a real value reached the backend"; else pass "backend never saw a real value ($(wc -l < "$WORK/received.jsonl" | tr -d ' ') requests)"; fi
 grep -q 'data:image' "$WORK/received.jsonl" && bad "blocked request reached the backend" || pass "blocked request never reached the backend"
 if grep "pii-router-decision" "$WORK/litellm.log" | grep -qE "ann\.kelly|4111"; then bad "value in decision log"; else pass "decision log has no values"; fi
+if grep -qE "ann\.kelly|4111" "$WORK/audit.jsonl"; then bad "a real value in the audit log"; else pass "audit log holds placeholders only"; fi
+[ "$(grep -c '"kind": "reply"' "$WORK/audit.jsonl")" = 5 ] && pass "audit log has the 5 cloud replies (stream included)" || bad "audit replies: $(grep -c '"kind": "reply"' "$WORK/audit.jsonl")"
+echo "--- audit viewer:"; PYTHONPATH="$PWD" "$PY" -m pii_router.audit --file "$WORK/audit.jsonl" -n 2
 echo "--- decision log:"; grep "pii-router-decision" "$WORK/litellm.log" | sed 's/.*pii-router-decision //' | cut -c1-220
 [ "$fail" = 0 ] || { echo "--- litellm log tail"; tail -30 "$WORK/litellm.log"; }
 exit "$fail"

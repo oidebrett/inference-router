@@ -21,6 +21,8 @@
 #           =local sends it unmasked to the local model (needs OLLAMA_MODEL).
 #           PII_ROUTER_RESIDUAL_CHECK=laya (default) re-checks the masked text with Laya; =none skips
 #           Laya (faster, not installed). PII_ROUTER_MASK_SECRET is generated once and preserved.
+#           PII_ROUTER_AUDIT=on keeps the last PII_ROUTER_AUDIT_KEEP (50) requests as sent to the cloud
+#           (placeholders only) and their replies before restore; view with `sudo pii-router-audit`.
 # PII_ROUTER_MODE=on|strict (default): PII routes to the local model (the original behaviour).
 # PII_ROUTER_MODE=off (PrivateInference without PII routing): no PII check, no local model.
 #           OLLAMA_MODEL is not needed, Laya/torch are not installed and its unit is removed;
@@ -143,6 +145,8 @@ PII_ROUTER_MODE=$PII_MODE
 PII_ROUTER_RESIDUAL_ACTION=$RESIDUAL_ACTION
 PII_ROUTER_RESIDUAL_CHECK=$RESIDUAL_CHECK
 PII_ROUTER_MASK_SECRET=$MASK_SECRET
+PII_ROUTER_AUDIT=${PII_ROUTER_AUDIT:-off}
+PII_ROUTER_AUDIT_KEEP=${PII_ROUTER_AUDIT_KEEP:-50}
 PII_ROUTER_PUBLIC_MODELS=${PII_ROUTER_PUBLIC_MODELS:-pii-router}
 ENVEOF
 chown root:pii-router "$ENV_FILE.new" && chmod 0640 "$ENV_FILE.new" && mv "$ENV_FILE.new" "$ENV_FILE"
@@ -158,6 +162,13 @@ OLLAMA_MODEL="${OLLAMA_MODEL:-}" NVIDIA_MODEL="$NVIDIA_MODEL" PII_ROUTER_MODE="$
   PII_ROUTER_PUBLIC_MODELS="${PII_ROUTER_PUBLIC_MODELS:-pii-router}" \
   PYTHONPATH="$PREFIX" "$PREFIX/venv/bin/python" -m pii_router.render_config "$ETC/config.yaml"
 chown root:pii-router "$ETC/config.yaml" && chmod 0640 "$ETC/config.yaml"
+
+# Terminal viewer for the masked-mode audit log (PII_ROUTER_AUDIT=on): sudo pii-router-audit
+cat > /usr/local/bin/pii-router-audit <<'AUDITEOF'
+#!/bin/sh
+exec env PYTHONPATH=/opt/pii-router /opt/pii-router/venv/bin/python -m pii_router.audit "$@"
+AUDITEOF
+chmod 0755 /usr/local/bin/pii-router-audit
 
 log "installing systemd units"
 install -m 0644 "$SRC_DIR/systemd/pii-router.service" /etc/systemd/system/pii-router.service
