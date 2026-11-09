@@ -6,7 +6,8 @@
 # Required: OLLAMA_MODEL (local model for PII requests, e.g. qwen3.5:0.8b on 8 GB, qwen3.5:4b on 16 GB; must support tool calling),
 #           and a cloud backend for everything else: NVIDIA_API_KEY (AgentGateway), OR
 #           CLOUD_BASE_URL + CLOUD_MODEL [+ CLOUD_API_KEY] (PrivateInference: the customer's Vast GPU).
-#           With CLOUD_BASE_URL, an NVIDIA_API_KEY becomes the FALLBACK used while the GPU is down
+#           With CLOUD_BASE_URL, FALLBACK_BASE_URL + FALLBACK_MODEL + FALLBACK_API_KEY (any OpenAI-compatible
+#           endpoint: NVIDIA, OpenRouter, …) or else an NVIDIA_API_KEY becomes the FALLBACK used while the GPU is down
 #           (health-checked at CLOUD_BASE_URL/models); without one, non-PII goes local while it is down.
 # Optional: NVIDIA_MODEL (default nvidia/nemotron-3.5-super-vl-120b-a12b; manidae-cloud
 # passes its configured default explicitly), OLLAMA_BASE_URL
@@ -64,10 +65,20 @@ else
   [ -n "${NVIDIA_API_KEY:-}" ] || die "NVIDIA_API_KEY (or CLOUD_BASE_URL) is required"
 fi
 NVIDIA_MODEL="${NVIDIA_MODEL:-nvidia/nemotron-3.5-super-vl-120b-a12b}"
-FALLBACK_BASE_URL=""; FALLBACK_MODEL=""; FALLBACK2_MODEL=""
-if [ -n "${CLOUD_BASE_URL:-}" ] && [ -n "${NVIDIA_API_KEY:-}" ]; then
+# Fallback used while the cloud backend (CLOUD_BASE_URL, e.g. a Vast GPU) is down. Either an explicit
+# OpenAI-compatible endpoint (FALLBACK_BASE_URL + FALLBACK_MODEL + FALLBACK_API_KEY: NVIDIA, OpenRouter,
+# any other), or, as before, NVIDIA from NVIDIA_API_KEY (+ NVIDIA_MODEL / NVIDIA_FALLBACK_MODEL).
+IN_FALLBACK_URL="${FALLBACK_BASE_URL:-}"; IN_FALLBACK_MODEL="${FALLBACK_MODEL:-}"; IN_FALLBACK_KEY="${FALLBACK_API_KEY:-}"; IN_FALLBACK2="${FALLBACK2_MODEL:-}"
+FALLBACK_BASE_URL=""; FALLBACK_MODEL=""; FALLBACK2_MODEL=""; FALLBACK_KEY=""
+if [ -n "${CLOUD_BASE_URL:-}" ] && [ -n "$IN_FALLBACK_URL" ]; then
+  [ -n "$IN_FALLBACK_MODEL" ] || die "FALLBACK_MODEL is required with FALLBACK_BASE_URL"
+  [ -n "$IN_FALLBACK_KEY" ] || die "FALLBACK_API_KEY is required with FALLBACK_BASE_URL"
+  FALLBACK_BASE_URL="$IN_FALLBACK_URL"; FALLBACK_MODEL="$IN_FALLBACK_MODEL"; FALLBACK_KEY="$IN_FALLBACK_KEY"
+  FALLBACK2_MODEL="$IN_FALLBACK2"   # optional second model on the same endpoint
+elif [ -n "${CLOUD_BASE_URL:-}" ] && [ -n "${NVIDIA_API_KEY:-}" ]; then
   FALLBACK_BASE_URL="${NVIDIA_BASE_URL:-https://integrate.api.nvidia.com/v1}"; FALLBACK_MODEL="$NVIDIA_MODEL"
   FALLBACK2_MODEL="${NVIDIA_FALLBACK_MODEL:-}"   # second NVIDIA model, tried when the first fails
+  FALLBACK_KEY="$NVIDIA_API_KEY"
 fi
 PYTHON="${PYTHON:-python3}"
 "$PYTHON" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' || die "Python 3.10+ required"
@@ -133,7 +144,7 @@ NVIDIA_API_KEY=${NVIDIA_API_KEY:-}
 CLOUD_BASE_URL=${CLOUD_BASE_URL:-}
 CLOUD_API_KEY=${CLOUD_API_KEY:-}
 FALLBACK_BASE_URL=$FALLBACK_BASE_URL
-FALLBACK_API_KEY=${NVIDIA_API_KEY:-}
+FALLBACK_API_KEY=$FALLBACK_KEY
 LAYA_API_KEY=$LAYA_KEY
 LAYA_PORT=$LAYA_PORT
 LAYA_MODELS=english

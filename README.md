@@ -98,6 +98,11 @@ The router strips its own markers from assistant history before deciding and for
 
 ## Cloud backend and fallback
 
+Both ends are generic OpenAI-compatible endpoints. The cloud backend is `CLOUD_BASE_URL` + `CLOUD_MODEL`
+(+ `CLOUD_API_KEY`); the fallback is `FALLBACK_BASE_URL` + `FALLBACK_MODEL` + `FALLBACK_API_KEY`
+(optional `FALLBACK2_MODEL`), e.g. `https://integrate.api.nvidia.com/v1` or `https://openrouter.ai/api/v1`.
+Without an explicit fallback, an `NVIDIA_API_KEY` still becomes the NVIDIA fallback (as below).
+
 The cloud backend is NVIDIA by default (AgentGateway). For **PrivateInference** it is the
 customer's own GPU: `CLOUD_BASE_URL` + `CLOUD_MODEL` (+ `CLOUD_API_KEY`). With an
 `NVIDIA_API_KEY` as well, NVIDIA becomes the fallback: the router probes
