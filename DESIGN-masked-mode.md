@@ -1,7 +1,9 @@
 # PII router — "Masked" mode (design, not implemented)
 
-Status: **proposal, parked 2026-10-04.** Builds on the shipped router in this directory
-(`README.md`). Nothing here changes current behaviour.
+Status: **implemented 2026-11-09** as `PII_ROUTER_MODE=masked` (see `README.md`). Differences
+from this proposal: personal content left after masking is BLOCKED by default
+(`PII_ROUTER_RESIDUAL_ACTION=block`, no Ollama needed) rather than routed local; system prompts
+are masked rather than left as an open question; no stage-2 NER yet. Original proposal below.
 
 ## 1. Problem
 

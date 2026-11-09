@@ -40,6 +40,46 @@ The bare question "does this contain PII?" caught only 3/12 — the wording in
 Parked follow-up: a **Masked** mode that pseudonymises identifiers and keeps those conversations
 on NVIDIA instead of going local — see [`DESIGN-masked-mode.md`](DESIGN-masked-mode.md).
 
+## Masked mode (`PII_ROUTER_MODE=masked`, 2026-11-09)
+
+For CPU-only boxes, where a local model takes minutes per agent turn
+(`docs/local-inference-feasibility.md`). Nothing is routed local by default:
+
+```
+request ─▶ detectors find each value ─▶ replaced by <TYPE_xxxxxxxx> placeholders
+        ─▶ Laya re-checks the MASKED text
+              ├─ still personal ─▶ BLOCKED with an explanatory reply (or local, see below)
+              └─ clean ──────────▶ cloud backend, plus a short system note about placeholders
+        ─▶ reply ─▶ real values put back (text, tool-call arguments, streamed chunks) ─▶ agent
+```
+
+- Placeholders are `HMAC(PII_ROUTER_MASK_SECRET, value)`: the same value gets the same placeholder
+  in every turn, so history stays consistent and the provider's prompt cache keeps working. The
+  secret is generated once by `install.sh` and preserved.
+- System prompts are masked too (agent memory can carry PII there). Maskable PII in history no
+  longer makes a conversation sticky; only content Laya still flags after masking does.
+- Only placeholders minted for the current request are restored. Placeholder look-alikes in
+  incoming text are neutralised (`<` becomes `‹`) first. Values put back into tool-call arguments
+  are JSON-escaped.
+- `PII_ROUTER_RESIDUAL_ACTION=block` (default) answers with a "[PII router] …" reply and never
+  calls a model; no Ollama is needed. `=local` sends that request unmasked to the local model
+  (needs `OLLAMA_MODEL`).
+- `PII_ROUTER_RESIDUAL_CHECK=laya` (default) or `none`: `none` skips Laya (not installed), which is
+  faster but does not catch a person described without an identifier (name + illness, salary…).
+- Fails closed: Laya down, oversize, images/files, a router error, a non-chat call or the cloud
+  down with no fallback all BLOCK (or go local with `=local`). If the hook is not loaded, the
+  public model name points at a deployment that only returns a block message.
+- Headers: `x-pii-route: cloud|fallback|blocked|local`, `x-pii-reason: masked|clean|current-turn|
+  history|fail-closed`, `x-pii-masked: <n>`. Masked replies end with ` ‡` (`PII_ROUTER_MASKED_MARKER`).
+- Limits: this is pseudonymisation, not anonymisation (context can still identify someone). Names
+  and addresses are not masked; they are left to Laya's re-check. The cloud model must repeat
+  placeholders exactly for tool calls to receive real values.
+
+```bash
+sudo PII_ROUTER_MODE=masked NVIDIA_API_KEY=nvapi-... scripts/pii-router/install.sh
+PY=/path/to/venv/bin/python scripts/pii-router/tests/e2e_masked.sh   # real LiteLLM, fake backend
+```
+
 ## Where a reply went, and why (2026-10-22)
 
 Every reply carries `x-pii-route: local|cloud|fallback` and `x-pii-reason:

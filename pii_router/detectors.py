@@ -16,6 +16,7 @@ to the local model. Laya still sees the text.
 from __future__ import annotations
 
 import re
+from typing import NamedTuple
 
 # RFC 2606 / 6761 documentation domains: addresses there are placeholders.
 _EXAMPLE_DOMAINS = re.compile(r"@(?:[\w-]+\.)*example\.(?:com|org|net)\b|@localhost\b", re.I)
@@ -48,7 +49,7 @@ _IE_PPSN = re.compile(r"\b(\d{7})([A-W])([A-IW]?)\b", re.I)
 _PASSPORT = re.compile(r"passport[^.\n]{0,40}?\b([A-Z]{1,2}\d{6,9})\b", re.I)
 _DOB = re.compile(
     r"\b(?:d\.?o\.?b\.?|date of birth|born on)\b[\s:]{0,3}"
-    r"(?:\d{1,2}[./-]\d{1,2}[./-]\d{2,4}|\d{1,2}\s+\w+\s+\d{4}|\w+\s+\d{1,2},?\s+\d{4})",
+    r"(\d{1,2}[./-]\d{1,2}[./-]\d{2,4}|\d{1,2}\s+\w+\s+\d{4}|\w+\s+\d{1,2},?\s+\d{4})",
     re.I,
 )
 
@@ -90,48 +91,62 @@ def _ppsn_ok(digits: str, check: str, extra: str) -> bool:
     return letter == check.upper()
 
 
-def _phone_hits(text: str) -> bool:
-    text = _DATETIME.sub(lambda m: " " * len(m.group()), text)
-    for match in _PHONE.finditer(text):
-        raw = match.group().strip()
-        digits = _digits(raw)
+class Span(NamedTuple):
+    """One detected value: its type and where it sits in the text (end exclusive).
+
+    Masked mode needs locations, not just names. The span is never logged."""
+    type: str
+    start: int
+    end: int
+
+
+def _phone_spans(text: str) -> list[Span]:
+    # Dates and times are blanked with spaces of the same length, so offsets in
+    # the blanked text are offsets in the original.
+    blanked = _DATETIME.sub(lambda m: " " * len(m.group()), text)
+    out: list[Span] = []
+    for match in _PHONE.finditer(blanked):
+        raw = match.group()
+        stripped = raw.strip()
+        digits = _digits(stripped)
         if not 9 <= len(digits) <= 15:
             continue
-        if _DATE_LIKE.match(raw):
+        if _DATE_LIKE.match(stripped):
             continue
         # Unprefixed numbers need 2+ separators: "30000-32767" is a port range.
-        if raw.startswith(("+", "0", "(")) or len(re.findall(r"\d[\s.-]\d", raw)) >= 2:
+        if stripped.startswith(("+", "0", "(")) or len(re.findall(r"\d[\s.-]\d", stripped)) >= 2:
             # A separated run that is really a card/IBAN is reported by those detectors.
             if _luhn_ok(digits) and len(digits) >= 13:
                 continue
-            return True
-    return False
+            lead = len(raw) - len(raw.lstrip())
+            begin = match.start() + lead
+            out.append(Span("phone", begin, begin + len(stripped)))
+    return out
+
+
+def find_spans(text: str) -> list[Span]:
+    """Every detected value with its location, sorted by position.
+
+    Overlapping spans are kept as found; the masker merges them."""
+    if not text:
+        return []
+    spans: list[Span] = []
+    for match in _EMAIL.finditer(text):
+        if not _EXAMPLE_DOMAINS.search(match.group()):
+            spans.append(Span("email", match.start(), match.end()))
+    spans += [Span("iban", m.start(), m.end()) for m in _IBAN.finditer(text) if _iban_ok(m.group())]
+    spans += [Span("payment_card", m.start(), m.end()) for m in _CARD.finditer(text)
+              if _luhn_ok(_digits(m.group()))]
+    spans += [Span("us_ssn", m.start(), m.end()) for m in _US_SSN.finditer(text)]
+    spans += [Span("uk_nino", m.start(), m.end()) for m in _UK_NINO.finditer(text)]
+    spans += [Span("ie_ppsn", m.start(), m.end()) for m in _IE_PPSN.finditer(text) if _ppsn_ok(*m.groups())]
+    # Passport and date of birth are keyword-anchored: mask the value, keep the keyword.
+    spans += [Span("passport", m.start(1), m.end(1)) for m in _PASSPORT.finditer(text)]
+    spans += [Span("date_of_birth", m.start(1), m.end(1)) for m in _DOB.finditer(text)]
+    spans += _phone_spans(text)
+    return sorted(spans, key=lambda s: (s.start, -(s.end - s.start)))
 
 
 def detect(text: str) -> list[str]:
     """Return the sorted names of the detectors that fire on ``text``."""
-    if not text:
-        return []
-    hits: set[str] = set()
-
-    for match in _EMAIL.finditer(text):
-        if not _EXAMPLE_DOMAINS.search(match.group()):
-            hits.add("email")
-            break
-    if any(_iban_ok(m.group()) for m in _IBAN.finditer(text)):
-        hits.add("iban")
-    if any(_luhn_ok(_digits(m.group())) for m in _CARD.finditer(text)):
-        hits.add("payment_card")
-    if _US_SSN.search(text):
-        hits.add("us_ssn")
-    if _UK_NINO.search(text):
-        hits.add("uk_nino")
-    if any(_ppsn_ok(*m.groups()) for m in _IE_PPSN.finditer(text)):
-        hits.add("ie_ppsn")
-    if _PASSPORT.search(text):
-        hits.add("passport")
-    if _DOB.search(text):
-        hits.add("date_of_birth")
-    if _phone_hits(text):
-        hits.add("phone")
-    return sorted(hits)
+    return sorted({span.type for span in find_spans(text)})

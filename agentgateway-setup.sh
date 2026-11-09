@@ -19,8 +19,9 @@ DIR="$(cd "$(dirname "$0")" && pwd)"
 CONTROLLER_ENV="${CONTROLLER_ENV:-/opt/openshell-controller/.env.local}"
 PORT="${PII_ROUTER_PORT:-4100}"
 
-[ -n "${OLLAMA_MODEL:-}" ] && [ -n "${NVIDIA_API_KEY:-}" ] || {
-  echo "[pii-router] OLLAMA_MODEL and NVIDIA_API_KEY are both required" >&2; exit 1; }
+[ -n "${NVIDIA_API_KEY:-}" ] || { echo "[pii-router] NVIDIA_API_KEY is required" >&2; exit 1; }
+# OLLAMA_MODEL is needed for strict mode and masked mode with PII_ROUTER_RESIDUAL_ACTION=local;
+# install.sh checks that.
 
 BRIDGE_IP="${PII_ROUTER_BRIDGE_IP:-$(ip -4 -o addr show docker0 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1)}"
 BRIDGE_IP="${BRIDGE_IP:-172.17.0.1}"

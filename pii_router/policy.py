@@ -57,6 +57,10 @@ class Settings:
     oversize_route: str = LOCAL   # when new text exceeds max_chunks
     media_route: str = LOCAL      # images/audio/files we cannot inspect
     cache_size: int = 20000
+    # Masked mode, PII_ROUTER_RESIDUAL_CHECK=none: no Laya pass, so a message the
+    # detectors find nothing in counts as clean (fast, but descriptions of a person
+    # with no identifier in them are not caught).
+    laya_enabled: bool = True
 
     @classmethod
     def from_env(cls, env=os.environ) -> "Settings":
@@ -74,6 +78,7 @@ class Settings:
             oversize_route=route(env.get("PII_ROUTER_OVERSIZE_ROUTE", LOCAL)),
             media_route=route(env.get("PII_ROUTER_MEDIA_ROUTE", LOCAL)),
             cache_size=_f("PII_ROUTER_CACHE_SIZE", 20000, int),
+            laya_enabled=(env.get("PII_ROUTER_RESIDUAL_CHECK") or "laya").strip().lower() != "none",
         )
 
 
@@ -190,7 +195,7 @@ class Router:
             unit_hits[unit.key] = hits
 
         # Laya pass over units the detectors did not already settle.
-        undecided = [u for u in pending if not unit_hits[u.key]]
+        undecided = [u for u in pending if not unit_hits[u.key]] if s.laya_enabled else []
         plan: list[tuple[str, str]] = []  # (unit key, chunk)
         chunks_needed: dict[str, int] = {}
         for unit in undecided:
@@ -229,6 +234,9 @@ class Router:
                 self.cache.put(unit.key, (True, tuple(hits)))
                 reasons.update(hits)
                 decision.flag(unit, hits)
+                continue
+            if not s.laya_enabled:
+                self.cache.put(unit.key, (False, ()))
                 continue
             if laya_failed or unit.key not in laya_scores:
                 # Not cached: a later turn retries once Laya is back / budget allows.
