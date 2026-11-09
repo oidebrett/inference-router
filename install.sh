@@ -14,7 +14,8 @@
 #           LITELLM_MASTER_KEY (the router's client key; generated once if not given),
 #           LAYA_PORT (4101), PII_ROUTER_LAYA_THRESHOLD (0.4),
 #           PII_ROUTER_PUBLIC_MODELS (pii-router; the names /v1/models lists),
-#           PII_ROUTER_CLOUD_REASONING_EFFORT (none; GPU thinking, only with CLOUD_BASE_URL).
+#           PII_ROUTER_CLOUD_REASONING_EFFORT (only with CLOUD_BASE_URL; default none for a self-hosted
+#           GPU, unset for hosted APIs such as NVIDIA or OpenRouter).
 # PII_ROUTER_MODE=masked: PII is replaced with placeholders, the request goes to the cloud backend,
 #           and the reply gets the real values back. PII_ROUTER_RESIDUAL_ACTION=block (default) answers
 #           with an explanation when personal content cannot be masked (no OLLAMA_MODEL needed);
@@ -152,13 +153,15 @@ ENVEOF
 chown root:pii-router "$ENV_FILE.new" && chmod 0640 "$ENV_FILE.new" && mv "$ENV_FILE.new" "$ENV_FILE"
 
 log "rendering LiteLLM config"
+# Passed only when set: render_config picks the default ("none" for a self-hosted GPU,
+# nothing for hosted APIs like NVIDIA or OpenRouter that may reject it).
+if [ -n "${PII_ROUTER_CLOUD_REASONING_EFFORT+set}" ]; then export PII_ROUTER_CLOUD_REASONING_EFFORT; fi
 OLLAMA_MODEL="${OLLAMA_MODEL:-}" NVIDIA_MODEL="$NVIDIA_MODEL" PII_ROUTER_MODE="$PII_MODE" \
   PII_ROUTER_RESIDUAL_ACTION="$RESIDUAL_ACTION" \
   OLLAMA_BASE_URL="${OLLAMA_BASE_URL:-http://127.0.0.1:11434}" \
   CLOUD_BASE_URL="${CLOUD_BASE_URL:-}" CLOUD_MODEL="${CLOUD_MODEL:-}" \
   FALLBACK_BASE_URL="$FALLBACK_BASE_URL" FALLBACK_MODEL="$FALLBACK_MODEL" FALLBACK2_MODEL="$FALLBACK2_MODEL" \
   PII_ROUTER_LOCAL_REASONING_EFFORT="${PII_ROUTER_LOCAL_REASONING_EFFORT-none}" \
-  PII_ROUTER_CLOUD_REASONING_EFFORT="${PII_ROUTER_CLOUD_REASONING_EFFORT-none}" \
   PII_ROUTER_PUBLIC_MODELS="${PII_ROUTER_PUBLIC_MODELS:-pii-router}" \
   PYTHONPATH="$PREFIX" "$PREFIX/venv/bin/python" -m pii_router.render_config "$ETC/config.yaml"
 chown root:pii-router "$ETC/config.yaml" && chmod 0640 "$ETC/config.yaml"
