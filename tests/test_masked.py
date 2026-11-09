@@ -316,3 +316,17 @@ def test_audit_file_is_trimmed(tmp_path):
         log.write({"kind": "request", "n": i})
     lines = (tmp_path / "a.jsonl").read_text().splitlines()
     assert len(lines) <= 8 and json.loads(lines[-1])["n"] == 19
+
+
+def test_residual_check_sees_masked_text_without_placeholders():
+    seen = []
+
+    class Recording(FakeLaya):
+        def score(self, texts):
+            seen.extend(texts)
+            return super().score(texts)
+
+    data = pre(hook(laya=Recording()), [user("note to ann.kelly@acme.ie: we call back on +353 87 123 4567")])
+    assert data["model"] == "cloud"
+    assert seen == ["note to: we call back on"]
+    assert PLACEHOLDER.search(sent_text(data))  # the cloud still gets placeholders

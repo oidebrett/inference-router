@@ -51,7 +51,8 @@ from litellm.integrations.custom_logger import CustomLogger
 from .audit import AuditLog
 from .health import CloudHealth
 from .laya_client import LayaHttpScorer
-from .mask import MaskSession, StreamRestorer, add_system_note, restore_json_text, restore_text
+from .mask import (MaskSession, StreamRestorer, add_system_note, for_residual_check, restore_json_text,
+                   restore_text)
 from .policy import CLOUD, CURRENT_TURN, FAIL_CLOSED, HISTORY, LOCAL, Router, Settings
 
 log = logging.getLogger("pii_router")
@@ -239,7 +240,7 @@ class PiiRouterHook(CustomLogger):
             self._strip_markers(data.get("messages"))
             session = MaskSession(self.mask_secret)
             masked = session.mask_messages(data.get("messages") or [])
-            decision = await asyncio.to_thread(self.router.decide, masked)
+            decision = await asyncio.to_thread(self.router.decide, for_residual_check(masked))
             fields.update(decision.log_fields())
         except Exception as error:  # noqa: BLE001 — fail closed on any bug
             fields.update(reasons=["router_error"], error=type(error).__name__)

@@ -147,6 +147,40 @@ class MaskSession:
         return masked
 
 
+_CHECK_STRIP = re.compile(r"[ \t]*<[A-Z][A-Z_]*_[0-9a-f]{8,16}>")
+
+
+def for_residual_check(masked_messages: list) -> list:
+    """The masked messages with placeholders REMOVED, for the residual (Laya) check.
+
+    The question there is "is anything personal left besides the identifiers we
+    already hid?". Laya reads a placeholder itself as personal data, and its score
+    swings with the placeholder's random hex (the same sentence scored 0.22 and 0.51
+    live on 2026-11-09). With them removed, maskable requests scored 0.04-0.13 while
+    a name with health or salary details still scored 0.68-0.80. Only used for the
+    check; the cloud still receives the placeholders."""
+    out = copy.deepcopy(list(masked_messages or []))
+
+    def strip(text):
+        return _CHECK_STRIP.sub("", text) if isinstance(text, str) else text
+
+    for message in out:
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content")
+        if isinstance(content, str):
+            message["content"] = strip(content)
+        elif isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and isinstance(part.get("text"), str):
+                    part["text"] = strip(part["text"])
+        for call in message.get("tool_calls") or []:
+            function = (call or {}).get("function")
+            if isinstance(function, dict) and isinstance(function.get("arguments"), str):
+                function["arguments"] = strip(function["arguments"])
+    return out
+
+
 def add_system_note(messages: list) -> list:
     """Tell the cloud model how to treat placeholders (only when something was masked)."""
     note = {"role": "system", "content": SYSTEM_NOTE}
