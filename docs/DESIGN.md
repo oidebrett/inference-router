@@ -98,7 +98,9 @@ one) — done inside the router, after masking, so a classifier only ever sees m
 | expiry, revoke, rotate | |
 | usage | **counts only**: requests, tokens, masked values, blocked — never content |
 
-Built on LiteLLM virtual keys (Postgres). The current single master key becomes the admin key.
+Built (2026-11-10) as our own SQLite key store (`router/inference_router/keys.py`) rather than LiteLLM
+virtual keys, which need Postgres plus Prisma engine downloads on every box. Keys need only a name: defaults
+are all routes, the router's privacy, 60 requests/minute, no token limit, no expiry. The master key is the admin key.
 
 ### Privacy
 
