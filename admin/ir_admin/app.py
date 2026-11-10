@@ -204,7 +204,7 @@ async def test_upstream(upstream_id: str, request: Request):
             if model:
                 t = time.time()
                 r = await client.post(f"{up.base_url}/chat/completions", headers=headers, json={
-                    "model": model, "max_tokens": 20,
+                    "model": model, "max_tokens": 256,
                     "messages": [{"role": "user", "content": "Reply with the single word OK."}]})
                 result["chat_status"] = r.status_code
                 result["latency_ms"] = round((time.time() - t) * 1000)
