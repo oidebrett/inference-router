@@ -18,7 +18,7 @@ NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 # Writes router.yaml and secrets.env; inference-router-reload.path restarts the router.
-ReadWritePaths=/etc/inference-router
+ReadWritePaths=/etc/inference-router /var/lib/inference-router
 PrivateTmp=true
 
 [Install]

@@ -28,7 +28,7 @@ routes:
 YAML
   PYTHONPATH="$PWD" "$PY" -m inference_router.render "$WORK/router.yaml" "$WORK/litellm.yaml"
   [ -n "${RPID:-}" ] && { kill "$RPID" 2>/dev/null || true; sleep 2; }
-  PYTHONPATH="$PWD" IR_CONFIG="$WORK/router.yaml" IR_MASK_SECRET=e2e LITELLM_MASTER_KEY="$KEY" \
+  PYTHONPATH="$PWD" IR_CONFIG="$WORK/router.yaml" IR_MASK_SECRET=e2e LITELLM_MASTER_KEY="$KEY" IR_KEYS_DB="$WORK/keys.db" \
     IR_KEY_DEAD=x IR_KEY_PUBLIC=x IR_KEY_OFFICE=x LITELLM_LOCAL_MODEL_COST_MAP=True \
     "$BIN/litellm" --config "$WORK/litellm.yaml" --host 127.0.0.1 --port 18300 >"$WORK/litellm-$1.log" 2>&1 &
   RPID=$!; pids+=($RPID)
@@ -61,6 +61,31 @@ echo "$models" | "$PY" -c 'import sys,json; ids=[m["id"] for m in json.load(sys.
   && pass "/v1/models lists routes only" || bad "models: $models"
 [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18300/v1/models -H 'Authorization: Bearer wrong')" = 401 ] \
   && pass "wrong key -> 401" || bad "wrong key"
+
+# Per-person keys (keys.db is shared with the admin service).
+read -r ANN ANN_ID BOT <<<"$(PYTHONPATH="$PWD" "$PY" -c "
+from inference_router.keys import KeyStore
+ks = KeyStore('$WORK/keys.db')
+ann, s1 = ks.create('Ann', routes=['default'])
+bot, s2 = ks.create('Bot', rpm=1)
+print(s1, ann.id, s2)")"
+uask() { curl -sS -D "$WORK/h.txt" http://127.0.0.1:18300/v1/chat/completions -H "Authorization: Bearer $1" \
+          -H "Content-Type: application/json" -d "$2"; }
+out=$(uask "$ANN" '{"model":"default","messages":[{"role":"user","content":"mail ann.kelly@acme.ie"}]}')
+echo "$out" | grep -q "seen: mail ann.kelly@acme.ie" && pass "person key works, still masked + restored" || bad "person key: $out"
+models=$(curl -sS http://127.0.0.1:18300/v1/models -H "Authorization: Bearer $ANN")
+echo "$models" | grep -q '"default"' && pass "person key lists its routes" || bad "person models: $models"
+uask "$BOT" '{"model":"default","messages":[{"role":"user","content":"hi"}]}' >/dev/null
+[ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18300/v1/chat/completions -H "Authorization: Bearer $BOT" -H 'Content-Type: application/json' -d '{"model":"default","messages":[{"role":"user","content":"hi"}]}')" = 429 ] \
+  && pass "rate limit -> 429" || bad "rate limit"
+PYTHONPATH="$PWD" "$PY" -c "from inference_router.keys import KeyStore; KeyStore('$WORK/keys.db').revoke($ANN_ID)"
+[ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18300/v1/chat/completions -H "Authorization: Bearer $ANN" -H 'Content-Type: application/json' -d '{"model":"default","messages":[{"role":"user","content":"hi"}]}')" = 401 ] \
+  && pass "revoked key -> 401 immediately" || bad "revoked key"
+PYTHONPATH="$PWD" "$PY" -c "
+from inference_router.keys import KeyStore
+u = {k['name']: k['usage']['today'] for k in KeyStore('$WORK/keys.db').list()}
+assert u['Ann']['requests'] == 1 and u['Ann']['masked'] == 1, u
+print('usage', u)" && pass "usage counted per key (counts only)" || bad "usage"
 
 : > "$WORK/private.jsonl"
 start_router keep_private

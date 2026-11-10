@@ -24,6 +24,7 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setenv("IR_CONFIG", str(tmp_path / "router.yaml"))
     monkeypatch.setenv("IR_SECRETS", str(tmp_path / "secrets.env"))
     monkeypatch.setenv("IR_ROUTER_ENV", str(tmp_path / "router.env"))
+    monkeypatch.setenv("IR_KEYS_DB", str(tmp_path / "keys.db"))
     import ir_admin.app as app_module
     app_module = importlib.reload(app_module)
     c = TestClient(app_module.app)
@@ -80,3 +81,27 @@ def test_events_need_the_token_and_keep_metadata_only(client):
     import ir_admin.app as app_module
     stored = list(app_module._events)[-1]
     assert "content" not in stored and "messages" not in stored and stored["route"] == "default"
+
+
+def test_keys_create_with_only_a_name_list_and_revoke(client):
+    r = client.post("/api/keys", headers=AUTH, json={"name": "Ann (finance)"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["secret"].startswith("sk-ir-")
+    assert body["key"]["routes"] is None and body["key"]["rpm"] == 60 and body["key"]["privacy"] is None
+    listed = client.get("/api/keys", headers=AUTH).json()
+    assert listed["routes"] == ["default"] and body["secret"] not in json.dumps(listed)
+    key_id = body["key"]["id"]
+    assert client.post(f"/api/keys/{key_id}/revoke", headers=AUTH).status_code == 200
+    assert client.post(f"/api/keys/{key_id}/revoke", headers=AUTH).status_code == 404
+
+
+def test_keys_validation(client):
+    assert client.post("/api/keys", headers=AUTH, json={"name": ""}).status_code == 400
+    assert client.post("/api/keys", headers=AUTH, json={"name": "x", "routes": ["ghost"]}).status_code == 400
+    r = client.post("/api/keys", headers=AUTH, json={"name": "x", "privacy": "mask_check"})
+    assert r.status_code == 400 and "Laya" in r.json()["detail"]          # not installed in this test
+    r = client.post("/api/keys", headers=AUTH, json={"name": "x", "privacy": "keep_private"})
+    assert r.status_code == 400 and "private" in r.json()["detail"]
+    r = client.post("/api/keys", headers=AUTH, json={"name": "x", "rpm": None, "tpd": 5000, "expires_days": 30})
+    assert r.status_code == 200 and r.json()["key"]["rpm"] is None and r.json()["key"]["tpd"] == 5000

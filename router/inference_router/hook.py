@@ -46,6 +46,7 @@ from pii_router.policy import CURRENT_TURN, FAIL_CLOSED, HISTORY, LOCAL, Router,
 
 from .config import Config, load
 from .detection import DetectionTimeout, Detector
+from .keys import KeyStore
 from .render import BLOCKED, chains
 
 log = logging.getLogger("inference_router")
@@ -74,6 +75,8 @@ BLOCK_MESSAGES = {
     "no_private_upstream": ("[Inference Router] This request contains personal information and this route "
                             "has no private upstream to answer it, so it was not sent."),
     "no_upstream": "[Inference Router] This route has no enabled upstream, so the request was not sent.",
+    "laya_unavailable": ("[Inference Router] This key requires the personal-data check (mask + check), but the "
+                         "checker is not installed on this router, so the request was not sent."),
 }
 
 
@@ -86,17 +89,25 @@ class RouterHook(CustomLogger):
     MAP_TTL = 900.0
     MAP_MAX = 2000
 
-    def __init__(self, config: Config | None = None, env=os.environ, scorer=None):
+    def __init__(self, config: Config | None = None, env=os.environ, scorer=None, keystore=None):
         super().__init__()
         self.env = env
         self.config = config or load(env.get("IR_CONFIG"))
         self.chains = chains(self.config)
         self.detector = Detector(self.config.privacy.rules)
-        settings = Settings.from_env(env)
-        settings.laya_enabled = self.config.privacy.laya
-        if scorer is None:
-            scorer = LayaHttpScorer.from_env(env) if self.config.privacy.laya else _NoLaya()
-        self.router = Router(scorer, settings, detect_fn=self.detector.detect)
+        # Two deciders: without Laya (mask: detectors only) and with it (mask_check, and
+        # keep_private when privacy.laya is on). Laya is available when configured or when
+        # the installer put it on the box (IR_LAYA_AVAILABLE=1), so a key can ask for it.
+        plain = Settings.from_env(env)
+        plain.laya_enabled = False
+        self.router_plain = Router(_NoLaya(), plain, detect_fn=self.detector.detect)
+        self.laya_available = self.config.privacy.laya or env.get("IR_LAYA_AVAILABLE") == "1" or scorer is not None
+        self.router_laya = None
+        if self.laya_available:
+            with_laya = Settings.from_env(env)
+            with_laya.laya_enabled = True
+            self.router_laya = Router(scorer or LayaHttpScorer.from_env(env), with_laya, detect_fn=self.detector.detect)
+        self._keystore = keystore
         secret = (env.get("IR_MASK_SECRET") or "").strip()
         if self.config.privacy.mode in ("mask", "mask_check") and not secret:
             log.warning("inference-router: IR_MASK_SECRET is not set; placeholders change after a restart")
@@ -130,12 +141,29 @@ class RouterHook(CustomLogger):
         except Exception:  # noqa: BLE001 — the feed is best effort
             pass
 
-    def _finish(self, data, outcome: str, **extra) -> None:
+    def keystore(self) -> KeyStore | None:
+        if self._keystore is None:
+            try:
+                self._keystore = KeyStore()
+            except Exception:  # noqa: BLE001 — usage counting must never break a request
+                self._keystore = False
+        return self._keystore or None
+
+    def _finish(self, data, outcome: str, tokens: int = 0, **extra) -> None:
         event = dict(self._meta(data).get("ir_event") or {})
         if not event or event.get("_done"):
             return
         self._meta(data)["ir_event"]["_done"] = True
         event.pop("_done", None)
+        key_id = self._meta(data).get("ir_key_id")
+        if key_id is not None and self.keystore():
+            try:
+                self.keystore().record(key_id, tokens=tokens, masked=event.get("reason") == MASKED,
+                                       blocked=event.get("decision") == BLOCKED_ROUTE)
+            except Exception:  # noqa: BLE001
+                pass
+        if tokens:
+            event["tokens"] = tokens
         event.update(outcome=outcome, total_ms=round((time.time() - event.get("ts", time.time())) * 1000), **extra)
         self._emit(event)
 
@@ -206,16 +234,24 @@ class RouterHook(CustomLogger):
         started = time.time()
         requested = data.get("model")
         route = self.config.route(requested)
-        mode = self.config.privacy.mode
+        key_meta = dict(getattr(user_api_key_dict, "metadata", None) or {})
+        mode = key_meta.get("ir_privacy") or self.config.privacy.mode
         event = {"ts": round(started, 3), "route": requested if route else None, "mode": mode,
-                 "stream": bool(data.get("stream"))}
+                 "stream": bool(data.get("stream")), "key": key_meta.get("ir_key_name")}
+        self._meta(data)["ir_key_id"] = key_meta.get("ir_key_id")
         if route is None:
             names = ", ".join(self.config.route_names()) or "none configured"
             return self._block(data, "unknown_model", event,
                                f"[Inference Router] Unknown model '{requested}'. Available: {names}.")
+        if key_meta.get("ir_routes") is not None and route.name not in key_meta["ir_routes"]:
+            return self._block(data, "route_not_allowed", event,
+                               f"[Inference Router] This API key may not use '{route.name}'. "
+                               f"Allowed: {', '.join(key_meta['ir_routes']) or 'none'}.")
         if call_type not in CHAT_CALL_TYPES:
             event["reasons"] = [f"unsupported_call_type:{call_type}"]
             return self._block(data, FAIL_CLOSED, event)
+        if mode == "mask_check" and self.router_laya is None:
+            return self._block(data, "laya_unavailable", event)
         chain = self.chains[route.name]
         try:
             self._strip_markers(data.get("messages"))
@@ -225,7 +261,8 @@ class RouterHook(CustomLogger):
             elif mode in ("mask", "mask_check"):
                 session = MaskSession(self.mask_secret, finder=self.detector.find_spans)
                 masked = session.mask_messages(messages)
-                verdict = await asyncio.to_thread(self.router.decide, for_residual_check(masked))
+                decider = self.router_laya if mode == "mask_check" else self.router_plain
+                verdict = await asyncio.to_thread(decider.decide, for_residual_check(masked))
                 event.update(masked=dict(sorted(session.counts.items())), masked_values=len(session.mapping),
                              laya_max=verdict.log_fields()["laya_max"], reasons=verdict.reasons)
                 if verdict.route == LOCAL:
@@ -235,7 +272,8 @@ class RouterHook(CustomLogger):
                     data["messages"] = add_system_note(masked)
                     self._keep_map(data, session.mapping)
             else:  # keep_private
-                verdict = await asyncio.to_thread(self.router.decide, messages)
+                decider = self.router_laya if (self.config.privacy.laya and self.router_laya) else self.router_plain
+                verdict = await asyncio.to_thread(decider.decide, messages)
                 event.update(laya_max=verdict.log_fields()["laya_max"], reasons=verdict.reasons)
                 if verdict.route == LOCAL:
                     if not chain["private"]:
@@ -311,16 +349,22 @@ class RouterHook(CustomLogger):
             pass
         finally:
             self._drop_map(data)
-            self._finish(data, "ok", served_by=getattr(response, "model", None))
+            usage = getattr(response, "usage", None)
+            self._finish(data, "ok", tokens=int(getattr(usage, "total_tokens", 0) or 0),
+                         served_by=getattr(response, "model", None))
         return response
 
     async def async_post_call_streaming_iterator_hook(self, user_api_key_dict, response, request_data):
         mapping = self._peek_map(request_data)
         marker = self._marker(request_data)
         try:
+            tokens = 0
             async for chunk in self._restore_stream(response, mapping, marker):
+                usage = getattr(chunk, "usage", None)
+                if usage is not None and getattr(usage, "total_tokens", None):
+                    tokens = int(usage.total_tokens)
                 yield chunk
-            self._finish(request_data, "ok")
+            self._finish(request_data, "ok", tokens=tokens)
         except Exception as error:
             self._finish(request_data, "error", error=type(error).__name__)
             raise

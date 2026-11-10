@@ -62,6 +62,7 @@ function Job({ ev, upName, refFn }) {
       ${ev.decision === "blocked" ? html`<span class="pill bad">refused</span>` : ev.reason === "masked" ? html`<span class="pill ok">masked</span>` : ev.decision === "private" ? html`<span class="pill private">kept private</span>` : html`<span class="pill">clean</span>`}
       ${ev.outcome === "error" && html`<span class="pill warn">error</span>`}</div>
     <div class="meta">
+      ${ev.key ? html`From ${ev.key}<br />` : ""}
       ${ev.decision === "blocked" ? html`Not sent · ${ev.reason}` : html`Sent to ${upName || "—"}${ev.served_by ? html` · ${ev.served_by}` : ""}`}<br />
       ${masked && html`${masked} hidden<br />`}
       ${ev.total_ms != null ? `${(ev.total_ms / 1000).toFixed(1)} s · ` : ""}${ago(ev.ts)}${ev.stream ? " · stream" : ""}
@@ -283,6 +284,76 @@ function Settings({ reload }) {
   </div>`;
 }
 
+// ---- keys -----------------------------------------------------------------------------
+const PRIVACY_LABEL = { "": "Router setting", off: "Off", mask: "Mask", mask_check: "Mask + check", keep_private: "Keep private" };
+const fmtDate = (ts) => ts ? new Date(ts * 1000).toLocaleDateString() : "—";
+
+function NewKey({ info, onCreated }) {
+  const [name, setName] = useState(""); const [more, setMore] = useState(false);
+  const [routes, setRoutes] = useState(null); const [privacy, setPrivacy] = useState("");
+  const [rpm, setRpm] = useState(String(info.default_rpm)); const [tpd, setTpd] = useState(""); const [expires, setExpires] = useState("");
+  const [err, setErr] = useState("");
+  const create = async (e) => {
+    e.preventDefault(); setErr("");
+    const body = { name };
+    if (more) { body.routes = routes; body.privacy = privacy || null; body.rpm = rpm ? Number(rpm) : null; body.tpd = tpd ? Number(tpd) : null; body.expires_days = expires ? Number(expires) : null; }
+    try { onCreated(await api("/api/keys", { method: "POST", body: JSON.stringify(body) })); setName(""); } catch (x) { setErr(x.message); }
+  };
+  const toggleRoute = (r) => { const cur = routes ?? info.routes; const next = cur.includes(r) ? cur.filter((x) => x !== r) : [...cur, r]; setRoutes(next.length === info.routes.length ? null : next); };
+  return html`<form class="panel" onSubmit=${create}>
+    <div class="section-title">New API key</div>
+    <div class="row"><input type="text" placeholder="Who or what uses it, e.g. Ann (finance) or Support bot" value=${name} onInput=${(e) => setName(e.target.value)} style="flex:1;min-width:260px" />
+      <button class="btn primary" disabled=${!name.trim()}>Create key</button>
+      <button type="button" class="btn small" onClick=${() => setMore(!more)}>${more ? "Fewer options" : "More options"}</button></div>
+    ${!more && html`<p class="note">Defaults: all routes · ${PRIVACY_LABEL[""].toLowerCase()} · ${info.default_rpm} requests/minute · no daily token limit · never expires.</p>`}
+    ${more && html`<div class="grid2" style="margin-top:12px">
+      <div><div class="note" style="margin-bottom:6px">Routes it may use</div><div class="row">${info.routes.map((r) => html`<label class="pill"><input type="checkbox" checked=${(routes ?? info.routes).includes(r)} onChange=${() => toggleRoute(r)} /> ${r}</label>`)}</div></div>
+      <label class="field"><span>Privacy for this key</span><select value=${privacy} onChange=${(e) => setPrivacy(e.target.value)}>
+        ${Object.entries(PRIVACY_LABEL).map(([v, l]) => html`<option value=${v} disabled=${(v === "mask_check" && !info.laya_available) || (v === "keep_private" && !info.has_private)}>${l}</option>`)}</select></label>
+      <label class="field"><span>Requests per minute (empty = no limit)</span><input type="text" value=${rpm} onInput=${(e) => setRpm(e.target.value.replace(/\D/g, ""))} /></label>
+      <label class="field"><span>Tokens per day (empty = no limit)</span><input type="text" value=${tpd} onInput=${(e) => setTpd(e.target.value.replace(/\D/g, ""))} /></label>
+      <label class="field"><span>Expires</span><select value=${expires} onChange=${(e) => setExpires(e.target.value)}>
+        <option value="">Never</option><option value="7">In 7 days</option><option value="30">In 30 days</option><option value="90">In 90 days</option><option value="365">In a year</option></select></label>
+    </div>`}
+    ${err && html`<div class="err">${err}</div>`}
+  </form>`;
+}
+
+function Keys({ status }) {
+  const [info, setInfo] = useState(null); const [created, setCreated] = useState(null); const [err, setErr] = useState("");
+  const load = useCallback(async () => { try { setInfo(await api("/api/keys")); } catch (x) { setErr(x.message); } }, []);
+  useEffect(() => { load(); const t = setInterval(load, 15000); return () => clearInterval(t); }, []);
+  if (!info) return html`<div class="empty">${err || "Loading…"}</div>`;
+  const revoke = async (k) => { if (!confirm(`Revoke the key for ${k.name}? Apps using it stop working immediately.`)) return; await api(`/api/keys/${k.id}/revoke`, { method: "POST" }); load(); };
+  const url = status.router.url;
+  return html`<div>
+    <${NewKey} info=${info} onCreated=${(r) => { setCreated(r); load(); }} />
+    <div class="panel">
+      <div class="section-title">Keys <span class="note">usage is counts only, never content</span></div>
+      ${info.keys.length === 0 ? html`<div class="empty">No keys yet. Create one per person, team or app; keep the admin key to yourself.</div>` : html`
+      <table><tr><th>Name</th><th>Key</th><th>Routes</th><th>Privacy</th><th>Limits</th><th>Today</th><th>30 days</th><th>Last used</th><th></th></tr>
+        ${info.keys.map((k) => html`<tr style=${k.active ? "" : "opacity:.5"}>
+          <td><b>${k.name}</b><div class="note">created ${fmtDate(k.created)}${k.expires ? ` · expires ${fmtDate(k.expires)}` : ""}</div></td>
+          <td class="mono">${k.prefix}…</td>
+          <td>${k.routes ? k.routes.join(", ") : html`<span class="note">all</span>`}</td>
+          <td>${PRIVACY_LABEL[k.privacy || ""]}</td>
+          <td class="note">${k.rpm ? `${k.rpm}/min` : "no rate limit"}<br />${k.tpd ? `${k.tpd.toLocaleString()} tokens/day` : "no token limit"}</td>
+          <td class="note">${k.usage.today.requests} req · ${k.usage.today.tokens.toLocaleString()} tok${k.usage.today.masked ? html`<br />${k.usage.today.masked} masked` : ""}${k.usage.today.blocked ? html`<br />${k.usage.today.blocked} refused` : ""}</td>
+          <td class="note">${k.usage["30d"].requests} req · ${k.usage["30d"].tokens.toLocaleString()} tok</td>
+          <td class="note">${k.last_used ? ago(k.last_used) : "never"}</td>
+          <td>${k.active ? html`<button class="btn small danger" onClick=${() => revoke(k)}>Revoke</button>` : html`<span class="pill bad">${k.revoked ? "revoked" : "expired"}</span>`}</td></tr>`)}
+      </table>`}
+    </div>
+    ${created && html`<div class="modal-back"><div class="modal">
+      <div class="section-title">Key for ${created.key.name}</div>
+      <div class="row"><code style="word-break:break-all">${created.secret}</code></div>
+      <div class="row" style="margin:10px 0"><button class="btn primary" onClick=${() => navigator.clipboard.writeText(created.secret)}>Copy key</button></div>
+      <p class="err" style="color:var(--amber)">${created.note}</p>
+      <pre class="panel mono" style="white-space:pre-wrap">${`curl ${url}/chat/completions \\\n  -H "Authorization: Bearer ${created.secret}" -H "Content-Type: application/json" \\\n  -d '{"model":"${(created.key.routes || info.routes)[0] || "default"}","messages":[{"role":"user","content":"Hello"}]}'`}</pre>
+      <button class="btn" onClick=${() => setCreated(null)}>Done</button></div></div>`}
+  </div>`;
+}
+
 // ---- endpoints ------------------------------------------------------------------------
 function Endpoints({ status, onClose }) {
   const url = status.router.url;
@@ -292,7 +363,7 @@ function Endpoints({ status, onClose }) {
     <div class="row"><code>${url}</code><button class="btn small" onClick=${() => navigator.clipboard.writeText(url)}>Copy</button></div>
     <p class="note">Models: ${status.routes.map((r) => r.name).join(", ") || "none yet"}. Any OpenAI-compatible client works with this base URL.</p>
     <pre class="panel mono" style="white-space:pre-wrap">${curl}</pre>
-    <p class="note">Per-person keys are coming; for now use the admin key.</p>
+    <p class="note">Give each person, team or app its own key (Keys tab); keep the admin key for administration.</p>
     <button class="btn" onClick=${onClose}>Close</button></div></div>`;
 }
 
@@ -313,7 +384,7 @@ function App() {
   const logout = async () => { await api("/api/logout", { method: "POST" }); setAuthed(false); };
   return html`<div class="shell">
     <div class="topbar"><span class="brand">Inference Router</span>
-      <div class="tabs">${[["overview", "Overview"], ["experiment", "Experimenter"], ["settings", "Settings"]].map(([k, l]) =>
+      <div class="tabs">${[["overview", "Overview"], ["keys", "Keys"], ["experiment", "Experimenter"], ["settings", "Settings"]].map(([k, l]) =>
         html`<button class=${`tab ${tab === k ? "active" : ""}`} onClick=${() => setTab(k)}>${l}</button>`)}</div>
       <span class="spacer"></span>
       <span class=${`pill ${status.router.healthy ? "ok" : "bad"}`}><span class=${`dot ${status.router.healthy ? "ok" : "bad"}`}></span>${status.router.healthy ? "router up" : "router down"}</span>
@@ -322,6 +393,7 @@ function App() {
       <button class="btn small" onClick=${logout}>Sign out</button></div>
     ${status.error && html`<div class="panel err">${status.error}</div>`}
     ${tab === "overview" && html`<${Overview} status=${status} events=${events} reload=${reload} />`}
+    ${tab === "keys" && html`<${Keys} status=${status} />`}
     ${tab === "experiment" && html`<${Experimenter} status=${status} />`}
     ${tab === "settings" && html`<${Settings} reload=${reload} />`}
     ${showEp && html`<${Endpoints} status=${status} onClose=${() => setShowEp(false)} />`}

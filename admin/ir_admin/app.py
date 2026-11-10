@@ -33,6 +33,7 @@ from fastapi.staticfiles import StaticFiles
 from inference_router.config import ConfigError, parse
 from inference_router.detection import DetectionTimeout, Detector
 from inference_router.hook import RouterHook
+from inference_router.keys import DEFAULT_RPM, KeyError_, KeyStore
 
 CONFIG_PATH = Path(os.environ.get("IR_CONFIG", "/etc/inference-router/router.yaml"))
 SECRETS_PATH = Path(os.environ.get("IR_SECRETS", "/etc/inference-router/secrets.env"))
@@ -46,6 +47,18 @@ _sessions: dict[str, float] = {}
 _events: deque = deque(maxlen=500)
 _listeners: set[asyncio.Queue] = set()
 _tests: dict[str, dict] = {}   # upstream id -> last Test result (no content beyond a short reply)
+_keystore: KeyStore | None = None
+
+
+def keystore() -> KeyStore:
+    global _keystore
+    if _keystore is None:
+        _keystore = KeyStore()
+    return _keystore
+
+
+def _laya_available(cfg) -> bool:
+    return cfg.privacy.laya or _read_env(ROUTER_ENV_PATH).get("IR_LAYA_AVAILABLE") == "1"
 
 
 # --- files ----------------------------------------------------------------------------
@@ -312,6 +325,77 @@ async def experiment(request: Request):
     return result
 
 
+# --- API keys -------------------------------------------------------------------------
+
+
+def _key_fields(body: dict, cfg, creating: bool) -> dict:
+    """Map the form to KeyStore fields. Omitted fields keep the defaults: all routes, the
+    router's privacy, 60 requests/minute, no daily token limit, no expiry."""
+    out = {}
+    if creating or "name" in body:
+        out["name"] = str(body.get("name") or "")
+    if "routes" in body or creating:
+        routes = body.get("routes")
+        if routes is not None:
+            unknown = [r for r in routes if not cfg.route(r)] if isinstance(routes, list) else ["?"]
+            if unknown:
+                raise HTTPException(status_code=400, detail=f"Unknown route(s): {', '.join(map(str, unknown))}")
+        out["routes"] = routes
+    if "privacy" in body or creating:
+        privacy = body.get("privacy") or None
+        if privacy == "mask_check" and not _laya_available(cfg):
+            raise HTTPException(status_code=400, detail="Mask + check needs the Laya classifier, which is not installed")
+        if privacy == "keep_private" and not any(u.private and u.enabled for u in cfg.upstreams):
+            raise HTTPException(status_code=400, detail="Keep private needs an upstream marked private")
+        out["privacy"] = privacy
+    for field, default in (("rpm", DEFAULT_RPM), ("tpd", None)):
+        if field in body:
+            value = body[field]
+            out[field] = None if value in (None, "", 0) else int(value)
+        elif creating:
+            out[field] = default
+    if "expires_days" in body:
+        value = body["expires_days"]
+        out["expires_days"] = None if value in (None, "", 0) else float(value)
+    return out
+
+
+@app.get("/api/keys", dependencies=[Depends(require_admin)])
+async def list_keys():
+    cfg = _config()
+    return {"keys": keystore().list(), "routes": cfg.route_names(), "laya_available": _laya_available(cfg),
+            "has_private": any(u.private and u.enabled for u in cfg.upstreams), "default_rpm": DEFAULT_RPM}
+
+
+@app.post("/api/keys", dependencies=[Depends(require_admin)])
+async def create_key(request: Request):
+    body = await request.json()
+    try:
+        fields = _key_fields(body, _config(), creating=True)
+        key, secret = keystore().create(**fields)
+    except (KeyError_, ValueError, TypeError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"key": key.public(), "secret": secret,
+            "note": "Copy this key now: it is shown only once and stored only as a hash."}
+
+
+@app.patch("/api/keys/{key_id}", dependencies=[Depends(require_admin)])
+async def update_key(key_id: int, request: Request):
+    body = await request.json()
+    try:
+        key = keystore().update(key_id, **_key_fields(body, _config(), creating=False))
+    except (KeyError_, ValueError, TypeError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"key": key.public()}
+
+
+@app.post("/api/keys/{key_id}/revoke", dependencies=[Depends(require_admin)])
+async def revoke_key(key_id: int):
+    if not keystore().revoke(key_id):
+        raise HTTPException(status_code=404, detail="No such active key")
+    return {"ok": True}
+
+
 # --- status and live feed ---------------------------------------------------------------
 
 @app.post("/internal/events")
@@ -322,7 +406,7 @@ async def post_event(request: Request):
         raise HTTPException(status_code=401)
     event = await request.json()
     allowed = {"ts", "route", "mode", "stream", "decision", "reason", "masked", "masked_values", "laya_max",
-               "reasons", "target", "decide_ms", "outcome", "total_ms", "served_by", "error"}
+               "reasons", "target", "decide_ms", "outcome", "total_ms", "served_by", "error", "key", "tokens"}
     event = {k: v for k, v in event.items() if k in allowed}   # metadata only, whatever is sent
     _events.append(event)
     for q in list(_listeners):
