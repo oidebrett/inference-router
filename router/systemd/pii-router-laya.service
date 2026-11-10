@@ -1,0 +1,26 @@
+[Unit]
+Description=PII router - Laya decision engine (laya-serve)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pii-router
+Group=pii-router
+EnvironmentFile=/etc/pii-router/pii-router.env
+Environment=LAYA_HOST=127.0.0.1
+Environment=LAYA_DEVICE=cpu
+Environment=LAYA_PRELOAD=1
+Environment=HF_HOME=/var/lib/pii-router/hf
+ExecStart=/opt/pii-router/venv/bin/laya-serve
+Restart=always
+RestartSec=5
+MemoryMax=3G
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/pii-router
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

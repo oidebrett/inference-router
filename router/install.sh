@@ -1,0 +1,211 @@
+#!/usr/bin/env bash
+# Install / upgrade the PII router on an agent-gateway host (idempotent).
+#
+#   sudo OLLAMA_MODEL=qwen3.5:4b NVIDIA_API_KEY=nvapi-... ./install.sh
+#
+# Required: OLLAMA_MODEL (local model for PII requests, e.g. qwen3.5:0.8b on 8 GB, qwen3.5:4b on 16 GB; must support tool calling),
+#           and a cloud backend for everything else: NVIDIA_API_KEY (AgentGateway), OR
+#           CLOUD_BASE_URL + CLOUD_MODEL [+ CLOUD_API_KEY] (PrivateInference: the customer's Vast GPU).
+#           With CLOUD_BASE_URL, FALLBACK_BASE_URL + FALLBACK_MODEL + FALLBACK_API_KEY (any OpenAI-compatible
+#           endpoint: NVIDIA, OpenRouter, …) or else an NVIDIA_API_KEY becomes the FALLBACK used while the GPU is down
+#           (health-checked at CLOUD_BASE_URL/models); without one, non-PII goes local while it is down.
+# Optional: NVIDIA_MODEL (default nvidia/nemotron-3.5-super-vl-120b-a12b; manidae-cloud
+# passes its configured default explicitly), OLLAMA_BASE_URL
+#           (default http://127.0.0.1:11434), PII_ROUTER_HOST (127.0.0.1), PII_ROUTER_PORT (4100),
+#           LITELLM_MASTER_KEY (the router's client key; generated once if not given),
+#           LAYA_PORT (4101), PII_ROUTER_LAYA_THRESHOLD (0.4),
+#           PII_ROUTER_PUBLIC_MODELS (pii-router; the names /v1/models lists),
+#           PII_ROUTER_CLOUD_REASONING_EFFORT (only with CLOUD_BASE_URL; default none for a self-hosted
+#           GPU, unset for hosted APIs such as NVIDIA or OpenRouter).
+# PII_ROUTER_MODE=masked: PII is replaced with placeholders, the request goes to the cloud backend,
+#           and the reply gets the real values back. PII_ROUTER_RESIDUAL_ACTION=block (default) answers
+#           with an explanation when personal content cannot be masked (no OLLAMA_MODEL needed);
+#           =local sends it unmasked to the local model (needs OLLAMA_MODEL).
+#           PII_ROUTER_RESIDUAL_CHECK=laya (default) re-checks the masked text with Laya; =none skips
+#           Laya (faster, not installed). PII_ROUTER_MASK_SECRET is generated once and preserved.
+#           PII_ROUTER_AUDIT=on keeps the last PII_ROUTER_AUDIT_KEEP (50) requests as sent to the cloud
+#           (placeholders only) and their replies before restore; view with `sudo pii-router-audit`.
+# PII_ROUTER_MODE=on|strict (default): PII routes to the local model (the original behaviour).
+# PII_ROUTER_MODE=off (PrivateInference without PII routing): no PII check, no local model.
+#           OLLAMA_MODEL is not needed, Laya/torch are not installed and its unit is removed;
+#           everything goes to the cloud backend (or the NVIDIA fallback while it is down).
+#
+# Result: OpenAI-compatible endpoint http://$PII_ROUTER_HOST:$PII_ROUTER_PORT/v1, model "pii-router",
+# authenticated with LITELLM_MASTER_KEY from /etc/pii-router/pii-router.env (generated once,
+# preserved on re-run). Point the OpenShell/NemoClaw "custom" provider at it.
+set -euo pipefail
+
+SRC_DIR="$(cd "$(dirname "$0")" && pwd)"
+PREFIX=/opt/pii-router
+STATE=/var/lib/pii-router
+ETC=/etc/pii-router
+ENV_FILE="$ETC/pii-router.env"
+
+log() { printf '[pii-router] %s\n' "$*"; }
+die() { printf '[pii-router] ERROR: %s\n' "$*" >&2; exit 1; }
+
+[ "$(id -u)" -eq 0 ] || die "run as root"
+PII_MODE="$(printf '%s' "${PII_ROUTER_MODE:-on}" | tr '[:upper:]' '[:lower:]')"
+[ "$PII_MODE" = "strict" ] && PII_MODE=on
+case "$PII_MODE" in on|off|masked) ;; *) die "PII_ROUTER_MODE must be on (strict), masked or off" ;; esac
+RESIDUAL_ACTION="$(printf '%s' "${PII_ROUTER_RESIDUAL_ACTION:-block}" | tr '[:upper:]' '[:lower:]')"
+RESIDUAL_CHECK="$(printf '%s' "${PII_ROUTER_RESIDUAL_CHECK:-laya}" | tr '[:upper:]' '[:lower:]')"
+case "$RESIDUAL_ACTION" in block|local) ;; *) die "PII_ROUTER_RESIDUAL_ACTION must be block or local" ;; esac
+case "$RESIDUAL_CHECK" in laya|none) ;; *) die "PII_ROUTER_RESIDUAL_CHECK must be laya or none" ;; esac
+NEEDS_OLLAMA=no; NEEDS_LAYA=no
+if [ "$PII_MODE" = "on" ]; then NEEDS_OLLAMA=yes; NEEDS_LAYA=yes; fi
+if [ "$PII_MODE" = "masked" ]; then
+  if [ "$RESIDUAL_ACTION" = "local" ]; then NEEDS_OLLAMA=yes; fi
+  if [ "$RESIDUAL_CHECK" = "laya" ]; then NEEDS_LAYA=yes; fi
+fi
+[ "$NEEDS_OLLAMA" = "no" ] || [ -n "${OLLAMA_MODEL:-}" ] || die "OLLAMA_MODEL is required for this PII_ROUTER_MODE"
+if [ -n "${CLOUD_BASE_URL:-}" ]; then
+  [ -n "${CLOUD_MODEL:-}" ] || die "CLOUD_MODEL is required with CLOUD_BASE_URL"
+else
+  [ -n "${NVIDIA_API_KEY:-}" ] || die "NVIDIA_API_KEY (or CLOUD_BASE_URL) is required"
+fi
+NVIDIA_MODEL="${NVIDIA_MODEL:-nvidia/nemotron-3.5-super-vl-120b-a12b}"
+# Fallback used while the cloud backend (CLOUD_BASE_URL, e.g. a Vast GPU) is down. Either an explicit
+# OpenAI-compatible endpoint (FALLBACK_BASE_URL + FALLBACK_MODEL + FALLBACK_API_KEY: NVIDIA, OpenRouter,
+# any other), or, as before, NVIDIA from NVIDIA_API_KEY (+ NVIDIA_MODEL / NVIDIA_FALLBACK_MODEL).
+IN_FALLBACK_URL="${FALLBACK_BASE_URL:-}"; IN_FALLBACK_MODEL="${FALLBACK_MODEL:-}"; IN_FALLBACK_KEY="${FALLBACK_API_KEY:-}"; IN_FALLBACK2="${FALLBACK2_MODEL:-}"
+FALLBACK_BASE_URL=""; FALLBACK_MODEL=""; FALLBACK2_MODEL=""; FALLBACK_KEY=""
+if [ -n "${CLOUD_BASE_URL:-}" ] && [ -n "$IN_FALLBACK_URL" ]; then
+  [ -n "$IN_FALLBACK_MODEL" ] || die "FALLBACK_MODEL is required with FALLBACK_BASE_URL"
+  [ -n "$IN_FALLBACK_KEY" ] || die "FALLBACK_API_KEY is required with FALLBACK_BASE_URL"
+  FALLBACK_BASE_URL="$IN_FALLBACK_URL"; FALLBACK_MODEL="$IN_FALLBACK_MODEL"; FALLBACK_KEY="$IN_FALLBACK_KEY"
+  FALLBACK2_MODEL="$IN_FALLBACK2"   # optional second model on the same endpoint
+elif [ -n "${CLOUD_BASE_URL:-}" ] && [ -n "${NVIDIA_API_KEY:-}" ]; then
+  FALLBACK_BASE_URL="${NVIDIA_BASE_URL:-https://integrate.api.nvidia.com/v1}"; FALLBACK_MODEL="$NVIDIA_MODEL"
+  FALLBACK2_MODEL="${NVIDIA_FALLBACK_MODEL:-}"   # second NVIDIA model, tried when the first fails
+  FALLBACK_KEY="$NVIDIA_API_KEY"
+fi
+PYTHON="${PYTHON:-python3}"
+"$PYTHON" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' || die "Python 3.10+ required"
+# `python3 -m venv --help` succeeds even without ensurepip, but creating a venv
+# then fails ("ensurepip is not available") — Ubuntu 24.04's cloud image ships
+# python3 without python3-venv (seen on the first live install, 2026-10-04).
+if ! "$PYTHON" -c 'import ensurepip' >/dev/null 2>&1; then
+  if command -v apt-get >/dev/null 2>&1; then
+    log "installing python3-venv"
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -q python3-venv >/dev/null
+  fi
+  "$PYTHON" -c 'import ensurepip' >/dev/null 2>&1 || die "python3-venv (ensurepip) is not installed"
+fi
+
+id pii-router >/dev/null 2>&1 || useradd --system --home-dir "$STATE" --shell /usr/sbin/nologin pii-router
+install -d -m 0755 "$PREFIX"
+install -d -m 0750 -o pii-router -g pii-router "$STATE" "$STATE/hf"
+install -d -m 0750 -o root -g pii-router "$ETC"
+
+# A failed earlier run can leave a venv without pip; rebuild it rather than reuse it.
+if [ -x "$PREFIX/venv/bin/python" ] && ! "$PREFIX/venv/bin/python" -m pip --version >/dev/null 2>&1; then
+  log "removing incomplete virtualenv"
+  rm -rf "$PREFIX/venv"
+fi
+if [ ! -x "$PREFIX/venv/bin/python" ]; then
+  log "creating virtualenv"
+  "$PYTHON" -m venv "$PREFIX/venv"
+fi
+"$PREFIX/venv/bin/python" -m pip install --quiet --upgrade pip
+if [ "$NEEDS_LAYA" = "yes" ] && [ "$(uname -m)" = "x86_64" ]; then
+  log "installing CPU-only torch (avoids multi-GB CUDA wheels)"
+  "$PREFIX/venv/bin/python" -m pip install --quiet torch==2.14.1 --index-url https://download.pytorch.org/whl/cpu
+fi
+if [ "$NEEDS_LAYA" = "yes" ]; then
+  log "installing laya + litellm"
+  "$PREFIX/venv/bin/python" -m pip install --quiet -r "$SRC_DIR/requirements.txt"
+else
+  log "installing litellm (no Laya for this mode)"
+  grep -v '^laya' "$SRC_DIR/requirements.txt" > "$STATE/requirements-off.txt"
+  "$PREFIX/venv/bin/python" -m pip install --quiet -r "$STATE/requirements-off.txt"
+fi
+
+log "installing router package"
+rm -rf "$PREFIX/pii_router.new"
+cp -R "$SRC_DIR/pii_router" "$PREFIX/pii_router.new"
+rm -rf "$PREFIX/pii_router.new/__pycache__"
+rm -rf "$PREFIX/pii_router" && mv "$PREFIX/pii_router.new" "$PREFIX/pii_router"
+
+# Secrets: generate once, keep on re-run so the configured provider key stays valid.
+existing() { [ -f "$ENV_FILE" ] && sed -n "s/^$1=//p" "$ENV_FILE" | tail -1 || true; }
+# LITELLM_MASTER_KEY from the caller wins (PrivateInference: manidae-cloud generates it
+# so it can show it to the customer); otherwise keep the existing one, else generate.
+MASTER_KEY="${LITELLM_MASTER_KEY:-$(existing LITELLM_MASTER_KEY)}"; [ -n "$MASTER_KEY" ] || MASTER_KEY="sk-pii-$(openssl rand -hex 24)"
+LAYA_KEY="$(existing LAYA_API_KEY)"; [ -n "$LAYA_KEY" ] || LAYA_KEY="$(openssl rand -hex 24)"
+# Placeholder secret: keep it across re-runs so placeholders stay stable.
+MASK_SECRET="$(existing PII_ROUTER_MASK_SECRET)"; [ -n "$MASK_SECRET" ] || MASK_SECRET="$(openssl rand -hex 32)"
+LAYA_PORT="${LAYA_PORT:-4101}"
+umask 027
+cat > "$ENV_FILE.new" <<ENVEOF
+# Managed by scripts/pii-router/install.sh. Re-run the installer to change values.
+LITELLM_MASTER_KEY=$MASTER_KEY
+NVIDIA_API_KEY=${NVIDIA_API_KEY:-}
+CLOUD_BASE_URL=${CLOUD_BASE_URL:-}
+CLOUD_API_KEY=${CLOUD_API_KEY:-}
+FALLBACK_BASE_URL=$FALLBACK_BASE_URL
+FALLBACK_API_KEY=$FALLBACK_KEY
+LAYA_API_KEY=$LAYA_KEY
+LAYA_PORT=$LAYA_PORT
+LAYA_MODELS=english
+PII_ROUTER_LAYA_URL=http://127.0.0.1:$LAYA_PORT
+PII_ROUTER_LAYA_THRESHOLD=${PII_ROUTER_LAYA_THRESHOLD:-0.4}
+PII_ROUTER_HOST=${PII_ROUTER_HOST:-127.0.0.1}
+PII_ROUTER_PORT=${PII_ROUTER_PORT:-4100}
+OLLAMA_MODEL=${OLLAMA_MODEL:-}
+PII_ROUTER_MODE=$PII_MODE
+PII_ROUTER_RESIDUAL_ACTION=$RESIDUAL_ACTION
+PII_ROUTER_RESIDUAL_CHECK=$RESIDUAL_CHECK
+PII_ROUTER_MASK_SECRET=$MASK_SECRET
+PII_ROUTER_AUDIT=${PII_ROUTER_AUDIT:-off}
+PII_ROUTER_AUDIT_KEEP=${PII_ROUTER_AUDIT_KEEP:-50}
+PII_ROUTER_PUBLIC_MODELS=${PII_ROUTER_PUBLIC_MODELS:-pii-router}
+ENVEOF
+chown root:pii-router "$ENV_FILE.new" && chmod 0640 "$ENV_FILE.new" && mv "$ENV_FILE.new" "$ENV_FILE"
+
+log "rendering LiteLLM config"
+# Passed only when set: render_config picks the default ("none" for a self-hosted GPU,
+# nothing for hosted APIs like NVIDIA or OpenRouter that may reject it).
+if [ -n "${PII_ROUTER_CLOUD_REASONING_EFFORT+set}" ]; then export PII_ROUTER_CLOUD_REASONING_EFFORT; fi
+OLLAMA_MODEL="${OLLAMA_MODEL:-}" NVIDIA_MODEL="$NVIDIA_MODEL" PII_ROUTER_MODE="$PII_MODE" \
+  PII_ROUTER_RESIDUAL_ACTION="$RESIDUAL_ACTION" \
+  OLLAMA_BASE_URL="${OLLAMA_BASE_URL:-http://127.0.0.1:11434}" \
+  CLOUD_BASE_URL="${CLOUD_BASE_URL:-}" CLOUD_MODEL="${CLOUD_MODEL:-}" \
+  FALLBACK_BASE_URL="$FALLBACK_BASE_URL" FALLBACK_MODEL="$FALLBACK_MODEL" FALLBACK2_MODEL="$FALLBACK2_MODEL" \
+  PII_ROUTER_LOCAL_REASONING_EFFORT="${PII_ROUTER_LOCAL_REASONING_EFFORT-none}" \
+  PII_ROUTER_PUBLIC_MODELS="${PII_ROUTER_PUBLIC_MODELS:-pii-router}" \
+  PYTHONPATH="$PREFIX" "$PREFIX/venv/bin/python" -m pii_router.render_config "$ETC/config.yaml"
+chown root:pii-router "$ETC/config.yaml" && chmod 0640 "$ETC/config.yaml"
+
+# Terminal viewer for the masked-mode audit log (PII_ROUTER_AUDIT=on): sudo pii-router-audit
+cat > /usr/local/bin/pii-router-audit <<'AUDITEOF'
+#!/bin/sh
+exec env PYTHONPATH=/opt/pii-router /opt/pii-router/venv/bin/python -m pii_router.audit "$@"
+AUDITEOF
+chmod 0755 /usr/local/bin/pii-router-audit
+
+log "installing systemd units"
+install -m 0644 "$SRC_DIR/systemd/pii-router.service" /etc/systemd/system/pii-router.service
+if [ "$NEEDS_LAYA" = "yes" ]; then
+  install -m 0644 "$SRC_DIR/systemd/pii-router-laya.service" /etc/systemd/system/pii-router-laya.service
+  systemctl daemon-reload
+  systemctl enable pii-router-laya.service pii-router.service >/dev/null
+  systemctl restart pii-router-laya.service
+  log "waiting for Laya (first start downloads the checkpoint, ~1.7 GB)"
+  for _ in $(seq 1 600); do curl -sf -o /dev/null "http://127.0.0.1:$LAYA_PORT/health" && break; sleep 1; done
+  curl -sf -o /dev/null "http://127.0.0.1:$LAYA_PORT/health" || die "laya-serve did not become healthy (journalctl -u pii-router-laya)"
+else
+  # No unit file at all: pii-router.service Wants= Laya, which would otherwise start it.
+  systemctl disable --now pii-router-laya.service >/dev/null 2>&1 || true
+  rm -f /etc/systemd/system/pii-router-laya.service
+  systemctl daemon-reload
+  systemctl enable pii-router.service >/dev/null
+fi
+systemctl restart pii-router.service
+PORT="${PII_ROUTER_PORT:-4100}"; HOST="${PII_ROUTER_HOST:-127.0.0.1}"
+# Probe the address the router is bound to: agentgateway-setup.sh binds the Docker
+# bridge IP, where 127.0.0.1 is never answered (2026-10-04 first live install).
+PROBE_HOST="$HOST"; [ "$PROBE_HOST" = "0.0.0.0" ] && PROBE_HOST=127.0.0.1
+for _ in $(seq 1 120); do curl -sf -o /dev/null "http://$PROBE_HOST:$PORT/health/liveliness" && break; sleep 1; done
+curl -sf -o /dev/null "http://$PROBE_HOST:$PORT/health/liveliness" || die "router did not become healthy (journalctl -u pii-router)"
+log "ready: http://$HOST:$PORT/v1  model=pii-router  key=LITELLM_MASTER_KEY in $ENV_FILE"

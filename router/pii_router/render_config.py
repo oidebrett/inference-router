@@ -1,0 +1,197 @@
+"""Render the LiteLLM proxy config for the PII router.
+
+    python -m pii_router.render_config /etc/pii-router/config.yaml
+
+Reads OLLAMA_MODEL and OLLAMA_BASE_URL for the local backend. The cloud backend is
+CLOUD_BASE_URL + CLOUD_MODEL (key CLOUD_API_KEY) when set: any OpenAI-compatible
+endpoint, e.g. https://openrouter.ai/api/v1, https://integrate.api.nvidia.com/v1 or
+the customer's Vast GPU; otherwise NVIDIA_BASE_URL + NVIDIA_MODEL (key NVIDIA_API_KEY), which is
+what AgentGateway uses. FALLBACK_BASE_URL + FALLBACK_MODEL (key FALLBACK_API_KEY)
+add the backend non-PII traffic uses while the cloud backend is down.
+PII_ROUTER_PUBLIC_MODELS (comma-separated, default pii-router) are the names
+callers use; each points where the public model does and /v1/models lists only
+these. With CLOUD_BASE_URL (a vLLM GPU), PII_ROUTER_CLOUD_REASONING_EFFORT
+(default none) switches thinking off: the same answer in ~0.5 s instead of ~5 s
+on Qwen3.8-27B (2026-10-23); set it empty to let the model think.
+Secrets are NOT written into the file: LiteLLM resolves ``os.environ/NAME`` at
+runtime from the systemd EnvironmentFile.
+
+The config must live OUTSIDE the directory holding the ``pii_router`` package:
+LiteLLM loads a callback that sits next to its config as a loose file, which
+breaks the package's relative imports. Elsewhere it falls back to a normal
+import via PYTHONPATH.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import sys
+
+PUBLIC = "pii-router"
+CLOUD = "cloud"
+FALLBACK = "cloud-fallback"
+FALLBACK2 = "cloud-fallback-2"
+LOCAL = "ollama-local"
+BLOCKED = "pii-blocked"
+BLOCKED_TEXT = "[PII router] This request was blocked: the PII router is not active."
+NVIDIA_BASE = "https://integrate.api.nvidia.com/v1"
+NVIDIA_DEFAULT_MODEL = "nvidia/nemotron-3.5-super-vl-120b-a12b"
+
+
+HOSTED_API_HOSTS = ("integrate.api.nvidia.com", "openrouter.ai", "api.openai.com")
+
+
+def _hosted_api(base_url: str) -> bool:
+    from urllib.parse import urlparse
+    host = (urlparse(base_url).hostname or "").lower()
+    return any(host == h or host.endswith("." + h) for h in HOSTED_API_HOSTS)
+
+
+def _cloud_params(env) -> dict:
+    custom = env.get("CLOUD_BASE_URL", "").strip()
+    if custom:
+        model, base, key = env.get("CLOUD_MODEL", "").strip(), custom, "CLOUD_API_KEY"
+        if not model:
+            raise SystemExit("CLOUD_MODEL is required with CLOUD_BASE_URL")
+    else:
+        model = env.get("NVIDIA_MODEL", NVIDIA_DEFAULT_MODEL).strip()
+        base, key = env.get("NVIDIA_BASE_URL", NVIDIA_BASE), "NVIDIA_API_KEY"
+    params = {"model": f"openai/{model}", "api_base": base.rstrip("/"), "api_key": f"os.environ/{key}"}
+    # A self-hosted GPU (vLLM on Vast) defaults to no thinking. Hosted APIs reached
+    # through CLOUD_BASE_URL (NVIDIA, OpenRouter) do not get the parameter unless it
+    # is set explicitly: not every hosted model accepts reasoning_effort="none".
+    default_effort = "" if _hosted_api(custom) else "none"
+    effort = env.get("PII_ROUTER_CLOUD_REASONING_EFFORT", default_effort).strip() if custom else ""
+    if effort:
+        params["extra_body"] = {"reasoning_effort": effort}
+    return params
+
+
+def _public_names(env) -> list:
+    names = [n.strip() for n in (env.get("PII_ROUTER_PUBLIC_MODELS") or PUBLIC).split(",")]
+    return [n for n in dict.fromkeys(names) if n]
+
+
+def _public_entries(env, params) -> list:
+    """The public name(s); pii-router is always kept so existing clients keep working."""
+    names = [PUBLIC] + [n for n in _public_names(env) if n != PUBLIC]
+    return [{"model_name": n, "litellm_params": dict(params)} for n in names]
+
+
+def _blocked_params() -> dict:
+    """A deployment that never calls a model: LiteLLM answers with mock_response.
+    The hook sends blocked requests here with a reason-specific message."""
+    return {"model": "openai/pii-blocked", "api_base": "http://127.0.0.1:9/v1", "api_key": "none",
+            "mock_response": BLOCKED_TEXT}
+
+
+def build(env=os.environ) -> dict:
+    mode = (env.get("PII_ROUTER_MODE") or "on").strip().lower()
+    ollama_model = env.get("OLLAMA_MODEL", "").strip()
+    if mode == "off":
+        return _build_unchecked(env)
+    if mode == "masked" and (env.get("PII_ROUTER_RESIDUAL_ACTION") or "block").strip().lower() != "local":
+        return _build_masked_block(env)
+    if not ollama_model:
+        raise SystemExit("OLLAMA_MODEL is required (the local model PII requests are routed to)")
+    ollama_base = env.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
+
+    local_params = {"model": f"openai/{ollama_model}", "api_base": f"{ollama_base}/v1", "api_key": "ollama"}
+    # Thinking models (qwen3.5) on CPU can spend minutes reasoning before the first
+    # answer token: 2,000 tokens / ~5 min and no answer vs 3 s with "none" (Oracle
+    # arm64, 2026-10-22). Ollama's OpenAI endpoint honours reasoning_effort; it
+    # ignores think:false. PII_ROUTER_LOCAL_REASONING_EFFORT= (empty) leaves it alone.
+    effort = env.get("PII_ROUTER_LOCAL_REASONING_EFFORT", "none").strip()
+    if effort:
+        local_params["extra_body"] = {"reasoning_effort": effort}
+    model_list = [
+        # The public name points at LOCAL: if the hook is not loaded, nothing reaches the cloud.
+        *_public_entries(env, local_params),
+        {"model_name": LOCAL, "litellm_params": dict(local_params)},
+        {"model_name": CLOUD, "litellm_params": _cloud_params(env)},
+        {"model_name": BLOCKED, "litellm_params": _blocked_params()},
+    ]
+    model_list += _fallback_models(env)
+    return {"model_list": model_list, **_settings(model_list)}
+
+
+def _fallback_models(env) -> list:
+    """FALLBACK_MODEL (+ optional FALLBACK2_MODEL) on FALLBACK_BASE_URL. The second
+    model is tried by LiteLLM when the first fails (NVIDIA's hosted models have
+    multi-minute 'Failed to generate completions' spells, seen 2026-10-22). Both are
+    remote, so this can never move a request to the local model."""
+    base = env.get("FALLBACK_BASE_URL", "").strip()
+    if not base:
+        return []
+    first = env.get("FALLBACK_MODEL", "").strip()
+    if not first:
+        raise SystemExit("FALLBACK_MODEL is required with FALLBACK_BASE_URL")
+    out = []
+    for name, model in ((FALLBACK, first), (FALLBACK2, env.get("FALLBACK2_MODEL", "").strip())):
+        if model:
+            out.append({"model_name": name, "litellm_params": {
+                "model": f"openai/{model}", "api_base": base.rstrip("/"),
+                "api_key": "os.environ/FALLBACK_API_KEY"}})
+    return out
+
+
+def _settings(model_list) -> dict:
+    names = {m["model_name"] for m in model_list}
+    router = {"enable_pre_call_checks": False}
+    if {FALLBACK, FALLBACK2} <= names:
+        router["fallbacks"] = [{FALLBACK: [FALLBACK2]}]
+    return {
+        "litellm_settings": {
+            "callbacks": "pii_router.hook.proxy_handler_instance",
+            # Agents send provider-specific params; the other backend may reject them.
+            "drop_params": True,
+            "num_retries": 0,  # a retry must not silently move a request to the other backend
+        },
+        "router_settings": router,
+        # custom_auth checks the master key itself: 401 for a wrong key (LiteLLM's own
+        # check says "400 No connected db" without a database) and a /models list of
+        # the public names only. See pii_router/auth.py.
+        "general_settings": {"master_key": "os.environ/LITELLM_MASTER_KEY",
+                             "custom_auth": "pii_router.auth.user_api_key_auth"},
+    }
+
+
+def _build_masked_block(env) -> dict:
+    """Masked mode without a local model: the public name points at the BLOCKED
+    deployment, so if the hook is not loaded nothing reaches the cloud unmasked."""
+    blocked = _blocked_params()
+    model_list = [
+        *_public_entries(env, blocked),
+        {"model_name": BLOCKED, "litellm_params": dict(blocked)},
+        {"model_name": CLOUD, "litellm_params": _cloud_params(env)},
+    ] + _fallback_models(env)
+    return {"model_list": model_list, **_settings(model_list)}
+
+
+def _build_unchecked(env) -> dict:
+    """PII_ROUTER_MODE=off: no local model. The public name points at the cloud
+    backend (there is nothing local to fail closed to); the hook still swaps in the
+    fallback while the cloud is down."""
+    cloud = _cloud_params(env)
+    model_list = [
+        *_public_entries(env, cloud),
+        {"model_name": CLOUD, "litellm_params": dict(cloud)},
+    ] + _fallback_models(env)
+    return {"model_list": model_list, **_settings(model_list)}
+
+
+def main(argv=None) -> int:
+    argv = argv if argv is not None else sys.argv[1:]
+    if len(argv) != 1:
+        print(__doc__, file=sys.stderr)
+        return 2
+    # JSON is valid YAML; avoids a PyYAML dependency at render time.
+    with open(argv[0], "w", encoding="utf-8") as fh:
+        json.dump(build(), fh, indent=2)
+        fh.write("\n")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
