@@ -155,6 +155,8 @@ class RouterHook(CustomLogger):
             return
         self._meta(data)["ir_event"]["_done"] = True
         event.pop("_done", None)
+        if event.get("decision") == BLOCKED_ROUTE:
+            tokens = 0   # refusals never reach a model; LiteLLM's mock reply reports token counts
         key_id = self._meta(data).get("ir_key_id")
         if key_id is not None and self.keystore():
             try:

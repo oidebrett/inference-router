@@ -135,3 +135,15 @@ def test_usage_recorded_on_success(ks):
     asyncio.run(h.async_post_call_success_hook(data, None, resp))
     usage = next(k for k in ks.list() if k["id"] == key.id)["usage"]["today"]
     assert usage == {"requests": 1, "tokens": 42, "masked": 1, "blocked": 0}
+
+
+def test_refusals_count_no_tokens(ks):
+    key, _ = ks.create("HR", privacy="mask_check")
+    h = hook(cfg(), ks)
+    h._emit = lambda e: None
+    data = pre(h, [user("Sarah is on sick leave")], {"ir_key_id": key.id, "ir_privacy": "mask_check"})
+    resp = NS(model="x", usage=NS(total_tokens=30),
+              choices=[NS(message=NS(content="refused", reasoning_content=None, tool_calls=None))])
+    asyncio.run(h.async_post_call_success_hook(data, None, resp))
+    usage = next(k for k in ks.list() if k["id"] == key.id)["usage"]["today"]
+    assert usage == {"requests": 1, "tokens": 0, "masked": 0, "blocked": 1}
