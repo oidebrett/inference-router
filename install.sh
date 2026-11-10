@@ -65,9 +65,10 @@ else
 fi
 
 log "installing code"
-for pkg in pii_router inference_router; do
+for pkg in pii_router inference_router ir_admin; do
+  from="$SRC/router/$pkg"; [ "$pkg" = ir_admin ] && from="$SRC/admin/ir_admin"
   rm -rf "$PREFIX/lib/$pkg.new"
-  cp -R "$SRC/router/$pkg" "$PREFIX/lib/$pkg.new"
+  cp -R "$from" "$PREFIX/lib/$pkg.new"
   rm -rf "$PREFIX/lib/$pkg.new/__pycache__"
   rm -rf "$PREFIX/lib/$pkg" && mv "$PREFIX/lib/$pkg.new" "$PREFIX/lib/$pkg"
 done
@@ -94,6 +95,10 @@ cat > "$ETC/router.env" <<ENVEOF
 # Managed by install.sh.
 IR_HOST=${IR_HOST:-127.0.0.1}
 IR_PORT=${IR_PORT:-4100}
+IR_ADMIN_HOST=${IR_ADMIN_HOST:-127.0.0.1}
+IR_ADMIN_PORT=${IR_ADMIN_PORT:-4110}
+IR_EVENTS_URL=http://127.0.0.1:${IR_ADMIN_PORT:-4110}/internal/events
+IR_PUBLIC_URL=${IR_PUBLIC_URL:-}
 PII_ROUTER_LAYA_URL=http://127.0.0.1:4101
 ENVEOF
 chmod 0644 "$ETC/router.env"
@@ -118,7 +123,7 @@ chown "$USER_NAME:$USER_NAME" "$SECRETS" && chmod 0600 "$SECRETS"
 
 log "installing systemd units"
 install -m 0644 "$SRC/systemd/inference-router.service" "$SRC/systemd/inference-router-reload.path" \
-  "$SRC/systemd/inference-router-reload.service" /etc/systemd/system/
+  "$SRC/systemd/inference-router-reload.service" "$SRC/systemd/inference-router-admin.service" /etc/systemd/system/
 if [ "$WITH_LAYA" = yes ]; then
   install -m 0644 "$SRC/systemd/inference-router-laya.service" /etc/systemd/system/
   systemctl daemon-reload
@@ -131,10 +136,11 @@ else
   rm -f /etc/systemd/system/inference-router-laya.service
   systemctl daemon-reload
 fi
-systemctl enable inference-router.service inference-router-reload.path >/dev/null
-systemctl restart inference-router.service
+systemctl enable inference-router.service inference-router-reload.path inference-router-admin.service >/dev/null
+systemctl restart inference-router.service inference-router-admin.service
 systemctl restart inference-router-reload.path
 HOST="${IR_HOST:-127.0.0.1}"; [ "$HOST" = 0.0.0.0 ] && HOST=127.0.0.1
 for _ in $(seq 1 120); do curl -sf -o /dev/null "http://$HOST:${IR_PORT:-4100}/health/liveliness" && break; sleep 1; done
 curl -sf -o /dev/null "http://$HOST:${IR_PORT:-4100}/health/liveliness" || die "router did not become healthy (journalctl -u inference-router)"
 log "ready: http://${IR_HOST:-127.0.0.1}:${IR_PORT:-4100}/v1  (admin key: LITELLM_MASTER_KEY in $SECRETS)"
+log "admin UI: http://${IR_ADMIN_HOST:-127.0.0.1}:${IR_ADMIN_PORT:-4110}/  (publish it only behind Pangolin SSO)"

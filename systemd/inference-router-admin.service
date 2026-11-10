@@ -1,0 +1,25 @@
+[Unit]
+Description=Inference Router - admin UI and API (put it behind Pangolin SSO)
+After=network-online.target inference-router.service
+
+[Service]
+Type=simple
+User=inference-router
+Group=inference-router
+EnvironmentFile=/etc/inference-router/router.env
+Environment=PYTHONPATH=/opt/inference-router/lib
+Environment=IR_CONFIG=/etc/inference-router/router.yaml
+Environment=IR_SECRETS=/etc/inference-router/secrets.env
+Environment=IR_ROUTER_ENV=/etc/inference-router/router.env
+ExecStart=/opt/inference-router/venv/bin/python -m ir_admin.app
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+# Writes router.yaml and secrets.env; inference-router-reload.path restarts the router.
+ReadWritePaths=/etc/inference-router
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
