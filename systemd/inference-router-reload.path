@@ -1,0 +1,9 @@
+[Unit]
+Description=Restart the Inference Router when its config or keys change
+
+[Path]
+PathChanged=/etc/inference-router/router.yaml
+PathChanged=/etc/inference-router/secrets.env
+
+[Install]
+WantedBy=multi-user.target

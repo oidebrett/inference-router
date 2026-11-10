@@ -1,0 +1,32 @@
+[Unit]
+Description=Inference Router (LiteLLM proxy + inference_router hook)
+After=network-online.target inference-router-laya.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=inference-router
+Group=inference-router
+EnvironmentFile=/etc/inference-router/router.env
+EnvironmentFile=/etc/inference-router/secrets.env
+Environment=PYTHONPATH=/opt/inference-router/lib
+Environment=IR_CONFIG=/etc/inference-router/router.yaml
+Environment=LITELLM_LOCAL_MODEL_COST_MAP=True
+Environment=NO_DOCS=True
+Environment=NO_REDOC=True
+Environment=DISABLE_ADMIN_UI=True
+WorkingDirectory=/var/lib/inference-router
+# Render LiteLLM's config from router.yaml at every start: an invalid router.yaml stops the
+# router instead of running with a stale or partial config.
+ExecStartPre=/opt/inference-router/venv/bin/python -m inference_router.render /etc/inference-router/router.yaml /var/lib/inference-router/litellm.yaml
+ExecStart=/bin/sh -c 'exec /opt/inference-router/venv/bin/litellm --config /var/lib/inference-router/litellm.yaml --host "${IR_HOST}" --port "${IR_PORT}" --num_workers 1'
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/inference-router
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

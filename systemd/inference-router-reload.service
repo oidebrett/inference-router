@@ -1,0 +1,6 @@
+[Unit]
+Description=Restart the Inference Router after a config change
+
+[Service]
+Type=oneshot
+ExecStart=/bin/systemctl restart inference-router.service
