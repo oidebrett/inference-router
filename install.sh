@@ -19,6 +19,10 @@
 #   IR_WITH_LAYA (yes)                          install the Laya classifier (mask_check, keep_private)
 #   IR_SEED_CONFIG                              router.yaml to install if none exists yet
 #   IR_KEY_<UPSTREAM ID>=...                    upstream keys to store (e.g. IR_KEY_NVIDIA)
+#   IR_ADMIN_HOST (127.0.0.1) IR_ADMIN_PORT (4110)  admin UI listener (behind Pangolin SSO in production)
+#   IR_ADMIN_KEY                                use this admin key instead of generating one
+#   IR_PUBLIC_URL                               the public endpoint shown in the admin UI
+#   IR_REF                                      (informational) the ref being installed
 # Secrets are generated once and kept on re-runs. No message content is ever logged.
 set -euo pipefail
 
@@ -82,7 +86,10 @@ put() { # name value: replace or append
   printf '%s=%s\n' "$1" "$2" >> "$SECRETS.new"
   mv "$SECRETS.new" "$SECRETS"
 }
-[ -n "$(get LITELLM_MASTER_KEY)" ] || put LITELLM_MASTER_KEY "sk-ir-$(openssl rand -hex 24)"
+# The admin key: one passed in (e.g. by a platform that shows it to the customer) wins,
+# else keep the existing one, else generate.
+if [ -n "${IR_ADMIN_KEY:-}" ]; then put LITELLM_MASTER_KEY "$IR_ADMIN_KEY"
+elif [ -z "$(get LITELLM_MASTER_KEY)" ]; then put LITELLM_MASTER_KEY "sk-ira-$(openssl rand -hex 24)"; fi
 [ -n "$(get IR_MASK_SECRET)" ] || put IR_MASK_SECRET "$(openssl rand -hex 32)"
 [ -n "$(get LAYA_API_KEY)" ] || put LAYA_API_KEY "$(openssl rand -hex 24)"
 [ -n "$(get IR_EVENTS_TOKEN)" ] || put IR_EVENTS_TOKEN "$(openssl rand -hex 24)"
@@ -97,7 +104,7 @@ IR_HOST=${IR_HOST:-127.0.0.1}
 IR_PORT=${IR_PORT:-4100}
 IR_ADMIN_HOST=${IR_ADMIN_HOST:-127.0.0.1}
 IR_ADMIN_PORT=${IR_ADMIN_PORT:-4110}
-IR_EVENTS_URL=http://127.0.0.1:${IR_ADMIN_PORT:-4110}/internal/events
+IR_EVENTS_URL=http://$( [ "${IR_ADMIN_HOST:-127.0.0.1}" = 0.0.0.0 ] && echo 127.0.0.1 || echo "${IR_ADMIN_HOST:-127.0.0.1}"):${IR_ADMIN_PORT:-4110}/internal/events
 IR_PUBLIC_URL=${IR_PUBLIC_URL:-}
 IR_LAYA_AVAILABLE=$([ "$WITH_LAYA" = yes ] && echo 1 || echo 0)
 IR_KEYS_DB=$STATE/keys.db

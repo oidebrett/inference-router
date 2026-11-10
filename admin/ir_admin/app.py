@@ -136,7 +136,7 @@ async def login(request: Request):
     _sessions[token] = time.time() + SESSION_TTL
     resp = JSONResponse({"ok": True})
     resp.set_cookie("ir_session", token, httponly=True, samesite="strict", max_age=SESSION_TTL,
-                    secure=request.url.scheme == "https")
+                    secure=request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https")
     return resp
 
 
