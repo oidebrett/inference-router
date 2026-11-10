@@ -49,6 +49,7 @@ fi
 id "$USER_NAME" >/dev/null 2>&1 || useradd --system --home-dir "$STATE" --shell /usr/sbin/nologin "$USER_NAME"
 install -d -m 0755 "$PREFIX" "$PREFIX/lib"
 install -d -m 0750 -o "$USER_NAME" -g "$USER_NAME" "$ETC" "$STATE" "$STATE/hf"
+install -d -m 0700 -o "$USER_NAME" -g "$USER_NAME" "$STATE/chatgpt"   # ChatGPT subscription sign-in
 
 if [ -x "$PREFIX/venv/bin/python" ] && ! "$PREFIX/venv/bin/python" -m pip --version >/dev/null 2>&1; then
   rm -rf "$PREFIX/venv"
@@ -108,6 +109,7 @@ IR_EVENTS_URL=http://$( [ "${IR_ADMIN_HOST:-127.0.0.1}" = 0.0.0.0 ] && echo 127.
 IR_PUBLIC_URL=${IR_PUBLIC_URL:-}
 IR_LAYA_AVAILABLE=$([ "$WITH_LAYA" = yes ] && echo 1 || echo 0)
 IR_KEYS_DB=$STATE/keys.db
+CHATGPT_TOKEN_DIR=$STATE/chatgpt
 PII_ROUTER_LAYA_URL=http://127.0.0.1:4101
 ENVEOF
 chmod 0644 "$ETC/router.env"

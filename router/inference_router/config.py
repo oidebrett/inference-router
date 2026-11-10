@@ -17,6 +17,7 @@ an invalid file is refused rather than partly applied.
     upstreams:
       - {id: nvidia, name: NVIDIA, base_url: https://integrate.api.nvidia.com/v1}
       - {id: office, name: Office GPU, base_url: https://gpu.example.com/v1, private: true}
+      - {id: my-claude, name: My Claude plan, kind: claude_subscription}   # admin-only, see subscriptions.py
     routes:
       - name: default
         targets:
@@ -33,7 +34,10 @@ from urllib.parse import urlparse
 
 import yaml
 
+from .subscriptions import CHATGPT, CHATGPT_BASE_URL, CLAUDE, CLAUDE_BASE_URL, KINDS as SUBSCRIPTION_KINDS
+
 DEFAULT_PATH = "/etc/inference-router/router.yaml"
+UPSTREAM_KINDS = ("openai",) + SUBSCRIPTION_KINDS
 PRIVACY_MODES = ("off", "mask", "mask_check", "keep_private")
 BUILTIN_TYPES = ("email", "phone", "iban", "payment_card", "us_ssn", "uk_nino", "ie_ppsn",
                  "passport", "date_of_birth")
@@ -73,6 +77,12 @@ class Upstream:
     private: bool = False
     enabled: bool = True
     reasoning_effort: str | None = None   # None = default for the host
+    kind: str = "openai"                  # openai | claude_subscription | chatgpt_subscription
+
+    @property
+    def subscription(self) -> bool:
+        """A person's own plan: only the admin key and keys allowed to are routed to it."""
+        return self.kind in SUBSCRIPTION_KINDS
 
     @property
     def key_env(self) -> str:
@@ -84,6 +94,8 @@ class Upstream:
         return any(host == h or host.endswith("." + h) for h in HOSTED_API_HOSTS)
 
     def effective_reasoning_effort(self) -> str:
+        if self.subscription:
+            return ""
         if self.reasoning_effort is not None:
             return self.reasoning_effort
         return "" if self.hosted else "none"
@@ -142,21 +154,37 @@ class Config:
     def route_names(self) -> list[str]:
         return [r.name for r in self.routes]
 
-    def live_targets(self, route: Route, private_only: bool = False) -> list[Target]:
+    def live_targets(self, route: Route, private_only: bool = False, shared_only: bool = False) -> list[Target]:
+        """Enabled targets; private_only for keep_private, shared_only without the
+        admin's personal subscriptions (for callers not allowed to use them)."""
         out = []
         for target in route.targets:
             up = self.upstream(target.upstream)
-            if up and up.enabled and (up.private or not private_only):
+            if up and up.enabled and (up.private or not private_only) and not (shared_only and up.subscription):
                 out.append(target)
         return out
+
+    def has_subscription(self, route: Route) -> bool:
+        return any((u := self.upstream(t.upstream)) and u.subscription and u.enabled for t in route.targets)
 
 
 def _parse_upstream(raw, i: int) -> Upstream:
     where = f"upstreams[{i}]"
-    raw = _keys(raw, where, {"id", "name", "base_url", "private", "enabled", "reasoning_effort"})
+    raw = _keys(raw, where, {"id", "name", "base_url", "private", "enabled", "reasoning_effort", "kind"})
     uid = str(raw.get("id") or "")
     if not _ID.match(uid):
         _fail(f"{where}.id must be lowercase letters, digits and dashes (max 32)")
+    kind = str(raw.get("kind") or "openai")
+    if kind not in UPSTREAM_KINDS:
+        _fail(f"{where}.kind must be one of {', '.join(UPSTREAM_KINDS)}")
+    if kind in SUBSCRIPTION_KINDS:
+        fixed = {CLAUDE: CLAUDE_BASE_URL, CHATGPT: CHATGPT_BASE_URL}[kind]
+        if raw.get("base_url") and str(raw["base_url"]).strip().rstrip("/") != fixed:
+            _fail(f"{where}: a {kind} upstream always uses {fixed}; leave base_url out")
+        if raw.get("private"):
+            _fail(f"{where}: a subscription is a hosted service, it cannot be marked private")
+        return Upstream(id=uid, name=str(raw.get("name") or uid), base_url=fixed, enabled=bool(raw.get("enabled", True)),
+                        kind=kind)
     url = str(raw.get("base_url") or "").strip().rstrip("/")
     parsed = urlparse(url)
     if parsed.scheme not in ("https", "http") or not parsed.hostname or parsed.username or parsed.password \
@@ -250,6 +278,8 @@ def parse(data) -> Config:
     ids = [u.id for u in upstreams]
     if len(ids) != len(set(ids)):
         _fail("upstream ids must be unique")
+    if sum(1 for u in upstreams if u.kind == CHATGPT) > 1:
+        _fail("only one ChatGPT subscription upstream is supported (it uses the router's one ChatGPT sign-in)")
     raw_routes = data.get("routes") or []
     if not isinstance(raw_routes, list):
         _fail("routes must be a list")

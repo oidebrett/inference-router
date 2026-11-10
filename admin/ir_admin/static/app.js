@@ -11,9 +11,14 @@ const PRESETS = [
   { id: "nvidia", name: "NVIDIA", base_url: "https://integrate.api.nvidia.com/v1", model: "nvidia/nemotron-3.5-super-vl-120b-a12b", hint: "nvapi-… from build.nvidia.com" },
   { id: "openrouter", name: "OpenRouter", base_url: "https://openrouter.ai/api/v1", model: "openai/gpt-4o-mini", hint: "sk-or-… from openrouter.ai" },
   { id: "openai", name: "OpenAI", base_url: "https://api.openai.com/v1", model: "gpt-4o-mini", hint: "sk-… from platform.openai.com" },
-  { id: "anthropic", name: "Anthropic (OpenAI-compatible)", base_url: "https://api.anthropic.com/v1", model: "claude-sonnet-4-5", hint: "sk-ant-… API key" },
+  { id: "anthropic", name: "Anthropic API (OpenAI-compatible)", base_url: "https://api.anthropic.com/v1", model: "claude-sonnet-4-5", hint: "sk-ant-api… API key" },
   { id: "custom", name: "Other OpenAI-compatible", base_url: "https://", model: "", hint: "the endpoint's API key (leave empty if none)" },
+  { id: "my-claude", name: "My Claude subscription", kind: "claude_subscription", route: "claude", model: "claude-sonnet-4-6", hint: "your Claude Pro/Max plan: a token from 'claude setup-token'" },
+  { id: "my-chatgpt", name: "My ChatGPT subscription", kind: "chatgpt_subscription", route: "chatgpt", model: "gpt-5.5", hint: "your ChatGPT Plus/Pro plan: sign in after saving" },
 ];
+const KIND_LABEL = { claude_subscription: "Claude subscription", chatgpt_subscription: "ChatGPT subscription" };
+const isSub = (u) => !!KIND_LABEL[u?.kind];
+const SUB_NOTE = "Personal subscriptions are routed only for your admin key and keys you allow to use them; everyone else goes to the route's next target. Using a plan through a router is subject to Anthropic's and OpenAI's terms and your plan's usage limits, so keep it for your own use and put a shared upstream after it: requests fall back to it when the limit is reached.";
 const MODES = [
   ["off", "Off", "Requests are sent as they are."],
   ["mask", "Mask", "Emails, phones, account and ID numbers become placeholders; real values return in the reply."],
@@ -47,10 +52,12 @@ function Login({ onIn }) {
 // ---- overview -------------------------------------------------------------------------
 function resolveUpstream(status, ev) {
   if (!ev.target || !status) return null;
-  const m = ev.target.match(/^ir\/(.+?)\/(private\/)?(\d+)$/); if (!m) return null;
+  const m = ev.target.match(/^ir\/(.+?)\/(?:(private|shared)\/)?(\d+)$/); if (!m) return null;
   const route = status.routes.find((r) => r.name === m[1]); if (!route) return null;
   const ups = Object.fromEntries(status.upstreams.map((u) => [u.id, u]));
-  const live = route.targets.filter((t) => ups[t.upstream]?.enabled && (!m[2] || ups[t.upstream]?.private));
+  const live = route.targets.filter((t) => { const u = ups[t.upstream];
+    return u?.enabled && (m[2] !== "private" || u.private) && (m[2] !== "shared" || !isSub(u))
+      && (u.kind !== "chatgpt_subscription" || u.chatgpt?.signed_in); });
   return live[Number(m[3])]?.upstream || null;
 }
 
@@ -78,9 +85,10 @@ function UpstreamCard({ up, stats, refFn, onTest, testing }) {
       <div style="flex:1">
         <div class="row"><span class="name">${up.name}</span>
           ${up.private && html`<span class="pill private">private</span>`}
+          ${isSub(up) && html`<span class="pill private" title=${SUB_NOTE}>personal · admin only</span>`}
           ${!up.enabled && html`<span class="pill warn">disabled</span>`}
-          ${!up.key_set && html`<span class="pill warn">no key</span>`}</div>
-        <div class="sub">${host(up.base_url)}${t ? html` · last test ${ago(t.at)}: ${t.ok ? `OK in ${t.latency_ms} ms` : (t.error || `HTTP ${t.chat_status || t.models_status}`)}` : ""}</div>
+          ${!up.key_set && html`<span class="pill warn">${up.kind === "chatgpt_subscription" ? "not signed in" : up.kind === "claude_subscription" ? "no token" : "no key"}</span>`}</div>
+        <div class="sub">${isSub(up) ? `${KIND_LABEL[up.kind]}${up.chatgpt?.email ? ` · ${up.chatgpt.email}${up.chatgpt.plan ? ` (${up.chatgpt.plan})` : ""}` : ""}` : host(up.base_url)}${t ? html` · last test ${ago(t.at)}: ${t.ok ? `OK in ${t.latency_ms} ms` : (t.error || `HTTP ${t.chat_status || t.models_status}`)}` : ""}</div>
       </div>
       <button class="btn small" onClick=${onTest} disabled=${testing}>${testing ? "Testing…" : "Test"}</button>
     </div>
@@ -193,7 +201,7 @@ function Experimenter({ status }) {
           <div>${res.laya_max == null ? html`<span class="note">Laya not used in this mode.</span>` : html`Laya score ${res.laya_max} (refused at 0.4 or above)`}</div>
           ${res.reasons?.length ? html`<div class="note">Reasons: ${res.reasons.join(", ")}</div>` : ""}</div>
         <div class="step"><h4>4 · Decision</h4>
-          <div class=${`verdict ${res.decision}`}>${res.decision === "blocked" ? "Refused" : res.decision === "private" ? `Kept private → ${res.target.upstream}` : `Sent → ${res.target.upstream}`}</div>
+          <div class=${`verdict ${res.decision}`}>${res.decision === "blocked" ? "Refused" : res.decision === "private" ? `Kept private → ${res.target.upstream}` : `Sent → ${res.target.upstream}${res.target.subscription ? " (your subscription)" : ""}`}</div>
           ${res.decision !== "blocked" ? html`<div class="note">${res.target.model}${res.target.fallbacks.length ? html` · then ${res.target.fallbacks.join(", then ")}` : ""} · decided in ${res.decide_ms} ms</div>`
             : html`<div class="text" style="margin-top:6px">${res.refusal}</div>`}</div>
         ${(res.raw_reply != null || res.send_error) && html`<div class="step"><h4>5 · Reply</h4>
@@ -218,9 +226,18 @@ function Settings({ reload }) {
   const saveKey = async (id) => { setErr(""); try { await api(`/api/upstreams/${id}/key`, { method: "PUT", body: JSON.stringify({ key: keys[id] || "" }) }); setKeys({ ...keys, [id]: "" }); setOk(`Key saved for ${id}. The router restarts with it.`); await load(); reload(); } catch (x) { setErr(x.message); } };
   const addUpstream = (p) => set((n) => {
     let id = p.id; let i = 2; while (n.upstreams.some((u) => u.id === id)) id = `${p.id}-${i++}`;
+    if (p.kind) {
+      // A subscription gets its own route, with the first shared target as its fallback.
+      n.upstreams.push({ id, name: p.name, kind: p.kind });
+      const fallback = n.routes[0]?.targets.find((t) => !isSub(n.upstreams.find((u) => u.id === t.upstream)));
+      let name = p.route; let k = 2; while (n.routes.some((r) => r.name === name)) name = `${p.route}-${k++}`;
+      n.routes.push({ name, targets: [{ upstream: id, model: p.model }, ...(fallback ? [{ ...fallback }] : [])] });
+      return;
+    }
     n.upstreams.push({ id, name: p.name, base_url: p.base_url, private: false });
     if (p.model) { if (!n.routes.length) n.routes.push({ name: "default", targets: [] }); n.routes[0].targets.push({ upstream: id, model: p.model }); }
   });
+  const saved = (id) => cfg.upstreams?.some((x) => x.id === id);
   const rules = c.privacy.rules; rules.custom ??= []; rules.exceptions ??= []; rules.builtin ??= {};
   return html`<div>
     ${err && html`<div class="panel err">${err}</div>`}${ok && html`<div class="panel okmsg">${ok}</div>`}
@@ -253,16 +270,19 @@ function Settings({ reload }) {
       <table><tr><th>Name</th><th>Base URL</th><th>Private</th><th>Enabled</th><th>API key</th><th></th></tr>
         ${c.upstreams.map((u, i) => html`<tr>
           <td><input type="text" value=${u.name} onInput=${(e) => set((n) => { n.upstreams[i].name = e.target.value; })} /><div class="note mono">${u.id}</div></td>
-          <td><input type="text" class="mono" value=${u.base_url} onInput=${(e) => set((n) => { n.upstreams[i].base_url = e.target.value; })} /></td>
-          <td><input type="checkbox" checked=${!!u.private} onChange=${(e) => set((n) => { n.upstreams[i].private = e.target.checked; })} /></td>
+          <td>${isSub(u) ? html`<span class="pill private" title=${SUB_NOTE}>${KIND_LABEL[u.kind]} · admin only</span>`
+            : html`<input type="text" class="mono" value=${u.base_url} onInput=${(e) => set((n) => { n.upstreams[i].base_url = e.target.value; })} />`}</td>
+          <td><input type="checkbox" checked=${!!u.private} disabled=${isSub(u)} onChange=${(e) => set((n) => { n.upstreams[i].private = e.target.checked; })} /></td>
           <td><input type="checkbox" checked=${u.enabled !== false} onChange=${(e) => set((n) => { n.upstreams[i].enabled = e.target.checked; })} /></td>
-          <td><div class="row"><input type="password" placeholder=${keysSet[u.id] ? "set — enter to replace" : "not set"} value=${keys[u.id] || ""}
+          <td>${u.kind === "chatgpt_subscription" ? html`<${ChatGPTSignIn} saved=${saved(u.id)} onChange=${() => { load(); reload(); }} />`
+            : html`<div class="row"><input type="password" placeholder=${keysSet[u.id] ? "set — enter to replace" : u.kind === "claude_subscription" ? "sk-ant-oat01-… (claude setup-token)" : "not set"} value=${keys[u.id] || ""}
               onInput=${(e) => setKeys({ ...keys, [u.id]: e.target.value })} style="width:170px" />
-            <button class="btn small" disabled=${!keys[u.id] || !cfg.upstreams?.some((x) => x.id === u.id)} onClick=${() => saveKey(u.id)}>Save key</button></div></td>
+            <button class="btn small" disabled=${!keys[u.id] || !saved(u.id)} onClick=${() => saveKey(u.id)}>${u.kind === "claude_subscription" ? "Save token" : "Save key"}</button></div>`}</td>
           <td><button class="btn small danger" onClick=${() => set((n) => { n.upstreams.splice(i, 1); n.routes.forEach((r) => (r.targets = r.targets.filter((t) => t.upstream !== u.id))); })}>Remove</button></td></tr>`)}
       </table>
       <div class="row" style="margin-top:10px">Add: ${PRESETS.map((p) => html`<button class="btn small" title=${p.hint} onClick=${() => addUpstream(p)}>${p.name}</button>`)}</div>
-      <p class="note">Save the configuration first, then enter the new upstream's key.</p>
+      <p class="note">Save the configuration first, then enter the new upstream's key (or sign in, for ChatGPT).</p>
+      ${c.upstreams.some(isSub) && html`<p class="note" style="color:var(--amber)">${SUB_NOTE} Claude: run <code>claude setup-token</code> on your own computer and paste the token here; it is a credential for your whole Claude account.</p>`}
     </div>
 
     <div class="panel">
@@ -284,6 +304,28 @@ function Settings({ reload }) {
   </div>`;
 }
 
+function ChatGPTSignIn({ saved, onChange }) {
+  const [st, setSt] = useState(null); const [err, setErr] = useState("");
+  const poll = useCallback(async () => { try { setSt(await api("/api/chatgpt")); } catch (x) { setErr(x.message); } }, []);
+  useEffect(() => { if (saved) poll(); }, [saved]);
+  useEffect(() => {
+    if (!st?.pending || st.pending.state !== "waiting") return;
+    const t = setInterval(async () => { const r = await api("/api/chatgpt"); setSt(r); if (r.signed_in) onChange(); }, 4000);
+    return () => clearInterval(t);
+  }, [st?.pending?.state]);
+  if (!saved) return html`<span class="note">save first, then sign in</span>`;
+  if (!st) return html`<span class="note">${err || "…"}</span>`;
+  const start = async () => { setErr(""); try { await api("/api/chatgpt/start", { method: "POST" }); poll(); } catch (x) { setErr(x.message); } };
+  const out = async () => { if (!confirm("Sign out of ChatGPT? The router stops using your plan.")) return; await api("/api/chatgpt/signout", { method: "POST" }); poll(); onChange(); };
+  if (st.signed_in) return html`<div class="row"><span class="pill ok">${st.email || "signed in"}${st.plan ? ` · ${st.plan}` : ""}</span><button class="btn small" onClick=${out}>Sign out</button></div>`;
+  const p = st.pending;
+  return html`<div>
+    ${p?.state === "waiting" ? html`<div class="note">Open <a href=${p.verify_url} target="_blank" rel="noopener">${p.verify_url.replace("https://", "")}</a>, sign in and enter
+        <b class="mono" style="font-size:1.1em">${p.user_code}</b><br />Waiting… never share this code.</div>`
+      : html`<button class="btn small" onClick=${start}>Sign in with ChatGPT</button>${p?.error ? html`<div class="err">${p.error}</div>` : ""}`}
+    ${err && html`<div class="err">${err}</div>`}</div>`;
+}
+
 // ---- keys -----------------------------------------------------------------------------
 const PRIVACY_LABEL = { "": "Router setting", off: "Off", mask: "Mask", mask_check: "Mask + check", keep_private: "Keep private" };
 const fmtDate = (ts) => ts ? new Date(ts * 1000).toLocaleDateString() : "—";
@@ -292,11 +334,12 @@ function NewKey({ info, onCreated }) {
   const [name, setName] = useState(""); const [more, setMore] = useState(false);
   const [routes, setRoutes] = useState(null); const [privacy, setPrivacy] = useState("");
   const [rpm, setRpm] = useState(String(info.default_rpm)); const [tpd, setTpd] = useState(""); const [expires, setExpires] = useState("");
+  const [subsOk, setSubsOk] = useState(false);
   const [err, setErr] = useState("");
   const create = async (e) => {
     e.preventDefault(); setErr("");
     const body = { name };
-    if (more) { body.routes = routes; body.privacy = privacy || null; body.rpm = rpm ? Number(rpm) : null; body.tpd = tpd ? Number(tpd) : null; body.expires_days = expires ? Number(expires) : null; }
+    if (more) { body.routes = routes; body.privacy = privacy || null; body.rpm = rpm ? Number(rpm) : null; body.tpd = tpd ? Number(tpd) : null; body.expires_days = expires ? Number(expires) : null; body.subscriptions = subsOk; }
     try { onCreated(await api("/api/keys", { method: "POST", body: JSON.stringify(body) })); setName(""); } catch (x) { setErr(x.message); }
   };
   const toggleRoute = (r) => { const cur = routes ?? info.routes; const next = cur.includes(r) ? cur.filter((x) => x !== r) : [...cur, r]; setRoutes(next.length === info.routes.length ? null : next); };
@@ -314,6 +357,8 @@ function NewKey({ info, onCreated }) {
       <label class="field"><span>Tokens per day (empty = no limit)</span><input type="text" value=${tpd} onInput=${(e) => setTpd(e.target.value.replace(/\D/g, ""))} /></label>
       <label class="field"><span>Expires</span><select value=${expires} onChange=${(e) => setExpires(e.target.value)}>
         <option value="">Never</option><option value="7">In 7 days</option><option value="30">In 30 days</option><option value="90">In 90 days</option><option value="365">In a year</option></select></label>
+      ${info.has_subscription && html`<label class="row" title=${SUB_NOTE}><input type="checkbox" checked=${subsOk} onChange=${(e) => setSubsOk(e.target.checked)} />
+        May use my personal subscriptions (only for your own keys)</label>`}
     </div>`}
     ${err && html`<div class="err">${err}</div>`}
   </form>`;
@@ -335,7 +380,9 @@ function Keys({ status }) {
         ${info.keys.map((k) => html`<tr style=${k.active ? "" : "opacity:.5"}>
           <td><b>${k.name}</b><div class="note">created ${fmtDate(k.created)}${k.expires ? ` · expires ${fmtDate(k.expires)}` : ""}</div></td>
           <td class="mono">${k.prefix}…</td>
-          <td>${k.routes ? k.routes.join(", ") : html`<span class="note">all</span>`}</td>
+          <td>${k.routes ? k.routes.join(", ") : html`<span class="note">all</span>`}
+            ${(info.has_subscription || k.subscriptions) && k.active && html`<br /><label class="note" title=${SUB_NOTE}><input type="checkbox" checked=${!!k.subscriptions}
+              onChange=${async (e) => { await api(`/api/keys/${k.id}`, { method: "PATCH", body: JSON.stringify({ subscriptions: e.target.checked }) }); load(); }} /> my subscriptions</label>`}</td>
           <td>${PRIVACY_LABEL[k.privacy || ""]}</td>
           <td class="note">${k.rpm ? `${k.rpm}/min` : "no rate limit"}<br />${k.tpd ? `${k.tpd.toLocaleString()} tokens/day` : "no token limit"}</td>
           <td class="note">${k.usage.today.requests} req · ${k.usage.today.tokens.toLocaleString()} tok${k.usage.today.masked ? html`<br />${k.usage.today.masked} masked` : ""}${k.usage.today.blocked ? html`<br />${k.usage.today.blocked} refused` : ""}</td>

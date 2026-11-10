@@ -4,6 +4,9 @@ Description=Restart the Inference Router when its config or keys change
 [Path]
 PathChanged=/etc/inference-router/router.yaml
 PathChanged=/etc/inference-router/secrets.env
+# Written by the admin after a ChatGPT sign-in or sign-out (the router's own token
+# refreshes rewrite auth.json, which is deliberately not watched).
+PathChanged=/var/lib/inference-router/chatgpt/signed-in
 
 [Install]
 WantedBy=multi-user.target

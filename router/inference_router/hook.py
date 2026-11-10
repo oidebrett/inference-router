@@ -24,6 +24,10 @@ feed, held there in memory only.
 
 Headers: x-router-route, x-pii-route (upstream|private|blocked), x-pii-reason,
 x-pii-masked. Markers (configurable, empty disables): " ‡" masked, " †" answered privately.
+
+Personal subscriptions (the admin's Claude or ChatGPT plan, see subscriptions.py) are only
+in a route's chain for the admin key and keys allowed to use them (ir_subscriptions);
+everyone else gets the route's shared chain.
 """
 
 from __future__ import annotations
@@ -48,6 +52,9 @@ from .config import Config, load
 from .detection import DetectionTimeout, Detector
 from .keys import KeyStore
 from .render import BLOCKED, chains
+from .subscriptions import is_claude_token, never_prompt_for_chatgpt_login, with_claude_identity
+
+never_prompt_for_chatgpt_login()
 
 log = logging.getLogger("inference_router")
 if not log.handlers:
@@ -75,6 +82,8 @@ BLOCK_MESSAGES = {
     "no_private_upstream": ("[Inference Router] This request contains personal information and this route "
                             "has no private upstream to answer it, so it was not sent."),
     "no_upstream": "[Inference Router] This route has no enabled upstream, so the request was not sent.",
+    "subscription_only": ("[Inference Router] This route only uses the admin's personal subscription, which "
+                          "this API key may not use, so the request was not sent."),
     "laya_unavailable": ("[Inference Router] This key requires the personal-data check (mask + check), but the "
                          "checker is not installed on this router, so the request was not sent."),
 }
@@ -93,7 +102,7 @@ class RouterHook(CustomLogger):
         super().__init__()
         self.env = env
         self.config = config or load(env.get("IR_CONFIG"))
-        self.chains = chains(self.config)
+        self.chains = chains(self.config, env)
         self.detector = Detector(self.config.privacy.rules)
         # Two deciders: without Laya (mask: detectors only) and with it (mask_check, and
         # keep_private when privacy.laya is on). Laya is available when configured or when
@@ -254,7 +263,9 @@ class RouterHook(CustomLogger):
             return self._block(data, FAIL_CLOSED, event)
         if mode == "mask_check" and self.router_laya is None:
             return self._block(data, "laya_unavailable", event)
-        chain = self.chains[route.name]
+        chain = dict(self.chains[route.name])
+        if not key_meta.get("ir_subscriptions"):
+            chain["all"] = chain["shared"]
         try:
             self._strip_markers(data.get("messages"))
             messages = data.get("messages") or []
@@ -291,11 +302,19 @@ class RouterHook(CustomLogger):
             event["error"] = type(error).__name__
             return self._block(data, FAIL_CLOSED, event)
         if not target:
-            return self._block(data, "no_upstream", event)
+            reason = "subscription_only" if self.chains[route.name]["all"] and decision == UPSTREAM else "no_upstream"
+            return self._block(data, reason, event)
         data["model"] = target[0]
         event.update(target=target[0], decide_ms=round((time.time() - started) * 1000, 1))
         self._set(data, decision, reason, event)
         return data
+
+    async def async_pre_call_deployment_hook(self, kwargs, call_type):
+        """After LiteLLM picked the deployment: a Claude setup token needs Claude Code's
+        identity as the first system line (current models refuse setup tokens without it)."""
+        if is_claude_token(kwargs.get("api_key")) and isinstance(kwargs.get("messages"), list):
+            kwargs["messages"] = with_claude_identity(kwargs["messages"])
+        return kwargs
 
     # --- replies ----------------------------------------------------------------
 

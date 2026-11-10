@@ -5,6 +5,9 @@
   its rate limit (requests/minute) and daily token limit; 401 / 429 with a clear message.
   The key's allowed routes and privacy level ride along in the auth object's metadata and
   are enforced by the hook. /v1/models lists only the routes the key may use.
+
+The admin key, and person keys with ``subscriptions`` on, may be routed to the admin's
+personal Claude/ChatGPT subscription upstreams (ir_subscriptions); others are not.
 """
 
 from __future__ import annotations
@@ -53,7 +56,7 @@ def check(api_key: str | None, path: str, env=os.environ, route_names=None, keys
         if path.rstrip("/").endswith("/models"):
             return UserAPIKeyAuth(api_key=key, models=names)
         return UserAPIKeyAuth(api_key=key, user_role=LitellmUserRoles.PROXY_ADMIN,
-                              metadata={"ir_key_name": "admin"})
+                              metadata={"ir_key_name": "admin", "ir_subscriptions": True})
     ks = keystore or store()
     record = ks.verify(key)
     if record is None:
@@ -62,7 +65,8 @@ def check(api_key: str | None, path: str, env=os.environ, route_names=None, keys
         _deny("This API key has been revoked or has expired")
     allowed = [n for n in names if record.allows(n)]
     meta = {"ir_key_id": record.id, "ir_key_name": record.name, "ir_privacy": record.privacy,
-            "ir_routes": list(record.routes) if record.routes is not None else None}
+            "ir_routes": list(record.routes) if record.routes is not None else None,
+            "ir_subscriptions": record.subscriptions}
     if path.rstrip("/").endswith("/models"):
         return UserAPIKeyAuth(api_key=f"ir-key-{record.id}", models=allowed, metadata=meta)
     reason = ks.allow_request(record)

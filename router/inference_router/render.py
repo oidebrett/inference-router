@@ -4,7 +4,9 @@
 
 For every route the targets become deployments ``ir/<route>/<n>`` chained as LiteLLM
 fallbacks (target 0, then 1, ...). Routes with private upstreams also get a private
-chain ``ir/<route>/private/<n>`` for keep_private. The names callers use (the route
+chain ``ir/<route>/private/<n>`` for keep_private, and routes with a personal
+subscription (the admin's Claude or ChatGPT plan) a shared chain ``ir/<route>/shared/<n>``
+without it, for callers not allowed to use it. The names callers use (the route
 names) point at a deployment that only returns a block message: the hook picks the
 real chain, so if the hook is not loaded nothing reaches an upstream.
 
@@ -18,17 +20,29 @@ import json
 import sys
 
 from .config import Config, Route, load
+from .subscriptions import CHATGPT, CLAUDE, CLAUDE_BETAS, chatgpt_signed_in
 
 BLOCKED = "ir/blocked"
 BLOCKED_TEXT = "[Inference Router] This request was blocked: the router is not active."
 
 
-def chain_name(route: Route, n: int, private: bool = False) -> str:
-    return f"ir/{route.name}/{'private/' if private else ''}{n}"
+VARIANTS = ("all", "private", "shared")
+
+
+def chain_name(route: Route, n: int, private: bool | str = False) -> str:
+    variant = "private" if private is True else (private or "all")
+    return f"ir/{route.name}/{'' if variant == 'all' else variant + '/'}{n}"
 
 
 def _params(config: Config, target) -> dict:
     up = config.upstream(target.upstream)
+    if up.kind == CLAUDE:
+        # LiteLLM sends an sk-ant-oat token as Bearer with the oauth beta; the claude-code
+        # beta and the identity line (hook.async_pre_call_deployment_hook) complete the shape.
+        return {"model": f"anthropic/{target.model}", "api_key": f"os.environ/{up.key_env}",
+                "extra_headers": {"anthropic-beta": CLAUDE_BETAS}}
+    if up.kind == CHATGPT:
+        return {"model": f"chatgpt/{target.model}"}   # tokens: CHATGPT_TOKEN_DIR/auth.json
     params = {"model": f"openai/{target.model}", "api_base": up.base_url, "api_key": f"os.environ/{up.key_env}"}
     effort = up.effective_reasoning_effort()
     if effort:
@@ -41,24 +55,52 @@ def blocked_params() -> dict:
             "mock_response": BLOCKED_TEXT}
 
 
-def chains(config: Config) -> dict[str, dict[str, list[str]]]:
-    """route name -> {"all": [deployment names], "private": [...]} (enabled targets only)."""
-    out = {}
-    for route in config.routes:
-        all_names = [chain_name(route, i) for i, _ in enumerate(config.live_targets(route))]
-        private = [chain_name(route, i, True) for i, _ in enumerate(config.live_targets(route, private_only=True))]
-        out[route.name] = {"all": all_names, "private": private}
+def _targets(config: Config, route: Route, variant: str, env=None) -> list:
+    targets = config.live_targets(route, private_only=variant == "private", shared_only=variant == "shared")
+    # A ChatGPT target with no saved sign-in would fail every request: leave it out until
+    # the admin signs in (the sign-in restarts the router, which re-renders).
+    signed_in = None
+    out = []
+    for t in targets:
+        if config.upstream(t.upstream).kind == CHATGPT:
+            if signed_in is None:
+                signed_in = chatgpt_signed_in(env) if env is not None else chatgpt_signed_in()
+            if not signed_in:
+                continue
+        out.append(t)
     return out
 
 
-def build(config: Config) -> dict:
+def chains(config: Config, env=None) -> dict[str, dict[str, list[str]]]:
+    """route name -> {"all": [...], "private": [...], "shared": [...]} deployment names.
+    "shared" is "all" without personal subscriptions (the same chain when there are none)."""
+    out = {}
+    for route in config.routes:
+        names = {v: [chain_name(route, i, v) for i, _ in enumerate(_targets(config, route, v, env))]
+                 for v in ("all", "private")}
+        names["shared"] = ([chain_name(route, i, "shared") for i, _ in enumerate(_targets(config, route, "shared", env))]
+                           if config.has_subscription(route) else names["all"])
+        out[route.name] = names
+    return out
+
+
+def chain_targets(config: Config, route: Route, variant: str, env=None) -> list:
+    """The targets behind chains()[route][variant], in order."""
+    if variant == "shared" and not config.has_subscription(route):
+        variant = "all"
+    return _targets(config, route, variant, env)
+
+
+def build(config: Config, env=None) -> dict:
     model_list = [{"model_name": name, "litellm_params": blocked_params()} for name in config.route_names()]
     model_list.append({"model_name": BLOCKED, "litellm_params": blocked_params()})
     fallbacks = []
     for route in config.routes:
-        for private in (False, True):
-            targets = config.live_targets(route, private_only=private)
-            names = [chain_name(route, i, private) for i in range(len(targets))]
+        for variant in VARIANTS:
+            if variant == "shared" and not config.has_subscription(route):
+                continue
+            targets = _targets(config, route, variant, env)
+            names = [chain_name(route, i, variant) for i in range(len(targets))]
             for name, target in zip(names, targets):
                 model_list.append({"model_name": name, "litellm_params": _params(config, target)})
             if len(names) > 1:
