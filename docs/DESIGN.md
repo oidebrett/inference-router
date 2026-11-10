@@ -196,6 +196,14 @@ Stack: React + Tailwind, dark theme, served by the admin service.
   (`vastai_client.py`, `gpu_supervisor.py`) and moves here. Cold start measured 2026-11-09: ~25 min on
   a Bulgarian RTX PRO 6000 (31 GB weights download, compile, warm-up); earlier runs ~5 min. While it
   starts, the route's next upstream answers.
+  Spend controls (today manidae only has a max price per hour plus the customer's prepaid credit,
+  checked before each rental with a warning under 24 h of runway): add a **total spend limit**
+  (per day / month) that stops renting when reached, **stop when idle** (release the GPU after N
+  minutes without traffic, rent again on the next request, fallback answers during the cold start),
+  and an optional **schedule** (e.g. office hours only). Recovery as in manidae's supervisor: rebid
+  +30% on the same instance when outbid, on-demand for 24 h after two outbids in an hour, replace
+  lost/unhealthy GPUs with the same key and tunnel, pause after 6 rentals in an hour, sweep orphans.
+  Outbid → rebid → on-demand has only been unit-tested, never seen live.
 - **Connected machine**: anything serving an OpenAI-compatible API on the office network (vLLM, Ollama,
   LM Studio, llama.cpp), reached through Newt.
 - **NVIDIA PAIR cluster**: PAIR pools Ollama / LM Studio / llama.cpp / vLLM across machines on one LAN
