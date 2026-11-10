@@ -75,6 +75,7 @@ class MaskSession:
     """Masks every string of one request with a shared map."""
 
     secret: bytes
+    finder: object = None   # callable(text) -> list[Span]; default: the built-in detectors
     mapping: dict[str, str] = field(default_factory=dict)   # placeholder -> real value
     counts: dict[str, int] = field(default_factory=dict)    # type -> values masked (for the log)
     _by_value: dict[tuple[str, str], str] = field(default_factory=dict)
@@ -98,7 +99,7 @@ class MaskSession:
         if not text:
             return text
         text = _LOOKALIKE.sub(lambda m: f"{_ESCAPED_OPEN}{m.group(1)}{_ESCAPED_CLOSE}", text)
-        spans = _merge(find_spans(text))
+        spans = _merge((self.finder or find_spans)(text))
         if not spans:
             return text
         out, cursor = [], 0

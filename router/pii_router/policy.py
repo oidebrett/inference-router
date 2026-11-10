@@ -157,8 +157,9 @@ class _VerdictCache:
 
 
 class Router:
-    def __init__(self, scorer: LayaScorer, settings: Settings | None = None):
+    def __init__(self, scorer: LayaScorer, settings: Settings | None = None, detect_fn=None):
         self.scorer = scorer
+        self.detect = detect_fn or detect
         self.settings = settings or Settings()
         self.cache = _VerdictCache(self.settings.cache_size)
 
@@ -172,7 +173,7 @@ class Router:
         system_text = "\n".join(
             str(m.get("content") if isinstance(m.get("content"), str) else "")
             for m in messages or [] if isinstance(m, dict) and m.get("role") in ("system", "developer"))
-        decision.system_hits = detect(system_text)
+        decision.system_hits = self.detect(system_text)
 
         for unit in message_units(messages):
             cached = self.cache.get(unit.key)
@@ -189,7 +190,7 @@ class Router:
         # Deterministic pass over everything new: cheap, and covers what Laya misses.
         unit_hits: dict[str, list[str]] = {}
         for unit in pending:
-            hits = detect(unit.text)
+            hits = self.detect(unit.text)
             if unit.has_opaque_media and s.media_route == LOCAL:
                 hits = hits + [MEDIA]
             unit_hits[unit.key] = hits
