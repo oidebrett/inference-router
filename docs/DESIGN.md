@@ -224,6 +224,10 @@ Stack: React + Tailwind, dark theme, served by the admin service.
   as a **personal upstream usable only by keys owned by the admin who connected it**, clearly labelled,
   with automatic fallback when the cap is hit. Shared use should use Anthropic / OpenAI **API keys**.
   Check the providers' current terms before shipping this.
+  **Built (2026-11-10):** upstream kinds `claude_subscription` / `chatgpt_subscription`
+  (`router/inference_router/subscriptions.py`); routes with one get a shared chain
+  `ir/<route>/shared/<n>` without it, used for every key not marked `subscriptions`; the router
+  never starts a ChatGPT sign-in itself (only the admin UI does).
 
 ## 6. Security notes
 

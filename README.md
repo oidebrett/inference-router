@@ -16,7 +16,15 @@ Design: [docs/DESIGN.md](docs/DESIGN.md). Status: phase 1 in progress (see below
   explanation; fail closed (checker down, unreadable media, slow rule, unknown model).
 - Admin web UI: live metadata feed and upstream cards, upstream Test, the Experimenter
   (dry run or send-for-real, shown in the browser only), settings editor.
-- Not yet: per-person API keys (phase 1, next), Vast GPU upstream, tunnelled machines, PAIR.
+- Per-person API keys: hashed, shown once, per-key routes, privacy, rate and daily token limits,
+  usage counts only.
+- Personal subscriptions: the admin's own **Claude** plan (a `claude setup-token` token) or
+  **ChatGPT** plan (Sign in with ChatGPT in the admin UI) as an upstream. Only the admin key and
+  keys the admin marks "may use my subscriptions" are routed to it; everyone else gets the route's
+  next target. Put a shared upstream after it so requests fall back when the plan's limit is
+  reached. A plan is one person's account under the provider's terms: for shared use, add an
+  Anthropic or OpenAI API key instead.
+- Not yet: Vast GPU upstream, tunnelled machines, PAIR.
 
 ## Install (Linux, systemd)
 
