@@ -286,7 +286,12 @@ class Masker:
         if not streaming:
             raw = await upstream.aread()
             await upstream.aclose()
-            self._log(request, body, session, masker, upstream.status_code, started)
+            usage = {}
+            try:
+                usage = json.loads(raw).get("usage") or {}
+            except (ValueError, AttributeError):
+                pass
+            self._log(request, body, session, masker, upstream.status_code, started, usage)
             if mapping and upstream.status_code == 200 and request.url.path == "/v1/messages":
                 try:
                     raw = json.dumps(restore_message(json.loads(raw), mapping)).encode()
@@ -297,6 +302,7 @@ class Masker:
 
         async def events():
             restore = StreamRestore(mapping)
+            usage = {}
             buffer = b""
             try:
                 async for chunk in upstream.aiter_bytes():
@@ -311,21 +317,28 @@ class Masker:
                         except ValueError:
                             yield raw_event + b"\n\n"
                             continue
+                        if data.get("type") == "message_start":
+                            usage.update((data.get("message") or {}).get("usage") or {})
+                        elif data.get("type") == "message_delta":
+                            usage.update(data.get("usage") or {})
                         for out in (restore.event(data) if mapping else [data]):
                             yield sse(out)
             finally:
                 await upstream.aclose()
-                self._log(request, body, session, masker, upstream.status_code, started)
+                self._log(request, body, session, masker, upstream.status_code, started, usage)
 
         return StreamingResponse(events(), status_code=upstream.status_code, headers=out_headers,
                                  media_type="text/event-stream")
 
-    def _log(self, request, body, session, masker, status, started):
+    def _log(self, request, body, session, masker, status, started, usage=None):
+        usage = usage or {}
         log.info(json.dumps({
             "evt": "masked_request", "path": request.url.path,
             "user": request.headers.get("x-claude-gateway-user-email") or request.headers.get("x-claude-gateway-user-id"),
             "model": body.get("model"), "stream": bool(body.get("stream")), "mode": self.rules.mode,
             "masked": session.counts, "unmasked_media": masker.media, "status": status,
+            "tokens": {k: usage.get(k) for k in ("input_tokens", "cache_read_input_tokens",
+                                                 "cache_creation_input_tokens", "output_tokens") if k in usage},
             "ms": round((time.monotonic() - started) * 1000)}))
 
     def _dump(self, request, body):
