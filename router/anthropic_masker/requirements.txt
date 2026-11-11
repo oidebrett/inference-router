@@ -1,0 +1,6 @@
+# Pinned: verified together 2026-11-11 (tests/test_anthropic_masker.py). No LiteLLM needed.
+httpx==0.28.1
+PyYAML==6.0.3
+regex==2026.11.9
+starlette==1.10.0
+uvicorn==0.54.0

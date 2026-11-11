@@ -1,0 +1,13 @@
+{
+  "mode": "mask",
+  "rules": {
+    "builtin": {
+      "email": true, "phone": true, "iban": true, "payment_card": true,
+      "us_ssn": true, "uk_nino": true, "ie_ppsn": true, "passport": true, "date_of_birth": true
+    },
+    "custom": [
+      { "name": "CLAIM_NUMBER", "pattern": "CLM-\\d{4}-\\d{7}", "keywords": ["claim"] }
+    ],
+    "exceptions": []
+  }
+}
