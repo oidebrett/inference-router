@@ -17,6 +17,8 @@ STRUCTURED = [
     ("Customer phone is +353 87 123 4567, call her back.", "phone"),
     ("Office line: (01) 555 0199, ask for accounts.", "phone"),
     ("Call 087 123 4567 on 2026-10-04 at 13:20 about the order.", "phone"),  # phone next to a date
+    ("My colleague's phone is +353 86 123 4567. Repeat it back.", "phone"),  # before a full stop
+    ("Ring 0851234567.", "phone"),
     ("His SSN is 123-45-6789, add it to the tax form.", "us_ssn"),
     ("National Insurance number AB 12 34 56 C for the payroll record.", "uk_nino"),  # QQ is HMRC's example prefix, invalid
     ("PPS number 1234567TW for the Revenue form.", "ie_ppsn"),
