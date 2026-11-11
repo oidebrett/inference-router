@@ -42,7 +42,8 @@ from starlette.routing import Route
 
 from inference_router.config import ConfigError, _parse_rules
 from inference_router.detection import DetectionTimeout, Detector
-from pii_router.mask import SYSTEM_NOTE, MaskSession, StreamRestorer, restore_text
+from pii_router.detectors import Span
+from pii_router.mask import MaskSession, StreamRestorer, restore_text
 
 log = logging.getLogger("anthropic-masker")
 
@@ -50,6 +51,18 @@ SIGNED_BLOCKS = {"thinking", "redacted_thinking"}
 MEDIA_BLOCKS = {"image", "document"}
 REQUEST_HEADERS = {"anthropic-version", "anthropic-beta", "content-type", "accept"}
 RESPONSE_HEADER_PREFIXES = ("anthropic-", "request-id", "retry-after", "x-should-retry")
+
+# Not the inference router's SYSTEM_NOTE: that one says the model "cannot see" the values,
+# which made Claude tell users "I can't see the real value" and, once the masker restored
+# the value inside that sentence, "the placeholder CLM-2026-0007777 ... I made it up".
+# Here the user always sees the real value, so the model is told to treat the token as it.
+MASKER_NOTE = (
+    "Some personal values in this conversation, such as email addresses, phone numbers and account "
+    "or claim numbers, appear as tokens like <EMAIL_1a2b3c4d>. The user sees the real value wherever "
+    "a token appears: in your replies, in files you write and in tool calls. Treat each token as the "
+    "value itself and write it exactly as it appears, character for character. Never call it a "
+    "placeholder, token or hidden value, never mention masking, and never invent or change a token."
+)
 
 
 def _error(status: int, kind: str, message: str) -> JSONResponse:
@@ -156,10 +169,34 @@ class RequestMasker:
 def with_note(system):
     """The system prompt with the placeholder note appended (fixed text, cache friendly)."""
     if not system:
-        return SYSTEM_NOTE
+        return MASKER_NOTE
     if isinstance(system, str):
-        return system.rstrip() + "\n\n" + SYSTEM_NOTE
-    return list(system) + [{"type": "text", "text": SYSTEM_NOTE}]
+        return system.rstrip() + "\n\n" + MASKER_NOTE
+    return list(system) + [{"type": "text", "text": MASKER_NOTE}]
+
+
+def mask_request(secret: bytes, detector, body: dict):
+    """Mask a request in two passes. Pass 1 finds the values the rules detect anywhere in
+    the request; pass 2 masks every occurrence of those values, including ones the rules
+    alone would miss. Without it a keyword-gated rule leaks: "her claim is CLM-2026-0007777"
+    is masked, but Claude's own earlier reply "... CLM-2026-0007777 ..." (no keyword before
+    it) went to Anthropic in clear (spike, 2026-11-11)."""
+    probe = MaskSession(secret, finder=detector.find_spans)
+    RequestMasker(probe).body(body)
+    known = {value: token[1:].rsplit("_", 1)[0].lower() for token, value in probe.mapping.items()}
+
+    def finder(text):
+        spans = list(detector.find_spans(text))
+        for value, kind in known.items():
+            start = text.find(value)
+            while start != -1:
+                spans.append(Span(kind, start, start + len(value)))
+                start = text.find(value, start + len(value))
+        return spans
+
+    session = MaskSession(secret, finder=finder)
+    masker = RequestMasker(session)
+    return masker.body(body), session, masker
 
 
 # --- reply side ----------------------------------------------------------------------
@@ -266,7 +303,7 @@ class Masker:
         masker = RequestMasker(session)
         if self.rules.mode == "mask":
             try:
-                body = masker.body(body)
+                body, session, masker = mask_request(self.secret, self.rules.detector, body)
             except DetectionTimeout:
                 self._log(request, body, session, masker, 400, started)
                 return _error(400, "invalid_request_error",

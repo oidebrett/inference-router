@@ -4,10 +4,10 @@ import json
 
 import pytest
 
-from anthropic_masker.app import (RequestMasker, RulesFile, StreamRestore, parse_rules, restore_message,
-                                  with_note)
+from anthropic_masker.app import (MASKER_NOTE, RequestMasker, RulesFile, StreamRestore, mask_request, parse_rules,
+                                  restore_message, with_note)
 from inference_router.config import ConfigError
-from pii_router.mask import SYSTEM_NOTE, MaskSession
+from pii_router.mask import MaskSession
 
 EMAIL = "alice.smith@acme.ie"
 
@@ -46,7 +46,7 @@ def test_same_placeholder_everywhere_and_note_added():
     assert s.mapping[placeholder] == EMAIL and s.counts == {"email": 1}
     assert body["system"][0]["text"] == f"User email: {placeholder}"
     assert body["system"][0]["cache_control"] == {"type": "ephemeral"}
-    assert body["system"][-1] == {"type": "text", "text": SYSTEM_NOTE}
+    assert body["system"][-1] == {"type": "text", "text": MASKER_NOTE}
     assert body["messages"][0]["content"] == f"Write {placeholder} into notes.txt"
     tool_use = body["messages"][1]["content"][1]
     assert tool_use["input"] == {"file_path": "notes.txt", "content": f"contact: {placeholder}", "n": 3}
@@ -66,8 +66,8 @@ def test_nothing_masked_means_body_unchanged():
 
 
 def test_note_on_string_or_missing_system():
-    assert with_note(None) == SYSTEM_NOTE
-    assert with_note("Be brief. ") == "Be brief.\n\n" + SYSTEM_NOTE
+    assert with_note(None) == MASKER_NOTE
+    assert with_note("Be brief. ") == "Be brief.\n\n" + MASKER_NOTE
 
 
 def test_custom_rule_and_exception():
@@ -196,8 +196,30 @@ def test_end_to_end_streaming_through_the_app(tmp_path):
                                                                   "x-claude-gateway-user-email": "alice@oae.test"})
     assert r.status_code == 200 and r.headers["request-id"] == "req_1"
     assert seen["key"] == "sk-real" and seen["url"].endswith("/v1/messages?beta=true")
-    assert EMAIL not in json.dumps(seen["body"]) and seen["body"]["system"] == SYSTEM_NOTE
+    assert EMAIL not in json.dumps(seen["body"]) and seen["body"]["system"] == MASKER_NOTE
     text = "".join(json.loads(line[5:])["delta"]["text"] for line in r.text.splitlines()
                    if line.startswith("data:") and '"text_delta"' in line)
     assert text == f"Hi {EMAIL}"
     assert client.get("/v1/models").status_code == 404
+
+
+def test_value_found_once_is_masked_everywhere():
+    """A keyword-gated rule must not leak the value where the keyword is absent (spike leak)."""
+    rules = {"mode": "mask", "rules": {"custom": [{"name": "CLAIM_NUMBER", "pattern": "CLM-\\d{4}-\\d{7}",
+                                                   "keywords": ["claim"]}]}}
+    _, detector = parse_rules(rules)
+    body = {"model": "m", "messages": [
+        {"role": "assistant", "content": [{"type": "text", "text": "Stored as CLM-2026-0007777 in memory."}]},
+        {"role": "user", "content": "her claim is CLM-2026-0007777"}]}
+    masked, session, _ = mask_request(b"k", detector, body)
+    assert "CLM-2026-0007777" not in json.dumps(masked)
+    [token] = list(session.mapping)
+    assert token.startswith("<CLAIM_NUMBER_") and json.dumps(masked).count(token) == 2
+    # the same token as a single pass would give, so placeholders stay stable across turns
+    single = MaskSession(b"k", finder=detector.find_spans)
+    single.mask_text("claim CLM-2026-0007777")
+    assert list(single.mapping) == [token]
+
+
+def test_note_never_says_the_model_cannot_see():
+    assert "cannot see" not in MASKER_NOTE and "placeholder" in MASKER_NOTE.lower()
