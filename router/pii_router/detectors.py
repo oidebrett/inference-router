@@ -25,9 +25,12 @@ _EMAIL = re.compile(r"\b[\w.+-]+@[\w-]+(?:\.[\w-]+)*\.[A-Za-z]{2,}\b")
 
 # A phone number must LOOK like one: a leading + or 0, or separators between
 # digit groups. Bare runs of digits (timestamps, ids) are not phone numbers.
+# A number may end a sentence ("call +353 86 123 4567."): a full stop after it counts as the end
+# unless a digit follows, which still keeps versions and dotted ids out (Claude Gateway, 2026-11-11:
+# a phone number before a full stop reached Anthropic unmasked).
 _PHONE = re.compile(
-    r"(?<![\w.])(?:\+\d{1,3}[\s.-]?)?\(?\d{2,5}\)?(?:[\s.-]\d{2,5}){1,4}(?![\w.])"
-    r"|(?<![\w.])(?:\+\d{8,15}|0\d{8,11})(?![\w.])"
+    r"(?<![\w.])(?:\+\d{1,3}[\s.-]?)?\(?\d{2,5}\)?(?:[\s.-]\d{2,5}){1,4}(?!\w|\.\d)"
+    r"|(?<![\w.])(?:\+\d{8,15}|0\d{8,11})(?!\w|\.\d)"
 )
 _DATE_LIKE = re.compile(r"^\d{1,4}[./-]\d{1,2}[./-]\d{1,4}$")
 # Dates and times are blanked before the phone check. OpenClaw 2026.9.x adds
