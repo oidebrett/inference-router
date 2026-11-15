@@ -52,6 +52,21 @@ MEDIA_BLOCKS = {"image", "document"}
 REQUEST_HEADERS = {"anthropic-version", "anthropic-beta", "content-type", "accept"}
 RESPONSE_HEADER_PREFIXES = ("anthropic-", "request-id", "retry-after", "x-should-retry")
 
+
+def upstream_auth_header(key: str) -> dict:
+    """The header the Anthropic credential authenticates with, chosen by its prefix.
+
+    A Claude subscription setup token (`claude setup-token`, ``sk-ant-oat...``) is an OAuth Bearer
+    token: Anthropic rejects it in ``x-api-key`` with ``401 "invalid x-api-key"``. A standard API
+    key (``sk-ant-api...``) and a user key (``sk-ant-usr...``) authenticate with ``x-api-key``.
+    Verified against ``/v1/messages``: a plain ``Authorization: Bearer <setup-token>`` is accepted
+    (no oauth beta needed). Some models additionally expect the Claude Code identity on a setup
+    token; this proxy does not inject it, so a setup token here suits testing, not every model.
+    """
+    if key.startswith("sk-ant-oat"):
+        return {"authorization": f"Bearer {key}"}
+    return {"x-api-key": key}
+
 # Not the inference router's SYSTEM_NOTE: that one says the model "cannot see" the values,
 # which made Claude tell users "I can't see the real value" and, once the masker restored
 # the value inside that sentence, "the placeholder CLM-2026-0007777 ... I made it up".
@@ -311,7 +326,7 @@ class Masker:
         self._dump(request, body)
 
         headers = {k: v for k, v in request.headers.items() if k.lower() in REQUEST_HEADERS}
-        headers["x-api-key"] = self.anthropic_key
+        headers.update(upstream_auth_header(self.anthropic_key))
         url = self.upstream + request.url.path + (f"?{request.url.query}" if request.url.query else "")
         upstream = await self.client.send(
             self.client.build_request("POST", url, headers=headers, content=json.dumps(body).encode()), stream=True)

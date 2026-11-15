@@ -5,7 +5,7 @@ import json
 import pytest
 
 from anthropic_masker.app import (MASKER_NOTE, RequestMasker, RulesFile, StreamRestore, mask_request, parse_rules,
-                                  restore_message, with_note)
+                                  restore_message, upstream_auth_header, with_note)
 from inference_router.config import ConfigError
 from pii_router.mask import MaskSession
 
@@ -223,3 +223,46 @@ def test_value_found_once_is_masked_everywhere():
 
 def test_note_never_says_the_model_cannot_see():
     assert "cannot see" not in MASKER_NOTE and "placeholder" in MASKER_NOTE.lower()
+
+
+def test_setup_token_authenticates_as_bearer_not_x_api_key():
+    # A `claude setup-token` (sk-ant-oat...) is an OAuth Bearer token; Anthropic rejects it in
+    # x-api-key with "invalid x-api-key". It must go in Authorization: Bearer, never x-api-key.
+    h = upstream_auth_header("sk-ant-oat01-EXAMPLE")
+    assert h == {"authorization": "Bearer sk-ant-oat01-EXAMPLE"} and "x-api-key" not in h
+
+
+def test_api_key_and_user_key_authenticate_as_x_api_key():
+    assert upstream_auth_header("sk-ant-api03-EXAMPLE") == {"x-api-key": "sk-ant-api03-EXAMPLE"}
+    assert upstream_auth_header("sk-ant-usr-01-EXAMPLE") == {"x-api-key": "sk-ant-usr-01-EXAMPLE"}
+    for k in ("sk-ant-api03-EXAMPLE", "sk-ant-usr-01-EXAMPLE"):
+        assert "authorization" not in upstream_auth_header(k)
+
+
+def test_setup_token_goes_out_as_bearer_through_the_app(tmp_path):
+    """End to end: a sk-ant-oat upstream key reaches Anthropic as Authorization: Bearer, no x-api-key."""
+    import httpx
+    from starlette.testclient import TestClient
+    from anthropic_masker.app import create_app
+
+    rules = tmp_path / "pii-rules.json"
+    rules.write_text(json.dumps({"mode": "mask"}))
+    seen = {}
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        seen["x-api-key"] = request.headers.get("x-api-key")
+        seen["authorization"] = request.headers.get("authorization")
+        return httpx.Response(200, headers={"content-type": "application/json", "request-id": "req_1"},
+                              json={"id": "m", "type": "message", "role": "assistant", "content": []})
+
+    env = {"MASKER_KEY": "mk", "ANTHROPIC_API_KEY": "sk-ant-oat01-EXAMPLE", "MASK_SECRET": "s",
+           "PII_RULES_FILE": str(rules)}
+    app = create_app(env)
+    masker = app.routes[0].endpoint.__self__
+    masker.client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+    client = TestClient(app)
+
+    req = {"model": "claude-haiku-5-5", "messages": [{"role": "user", "content": "hi"}]}
+    r = client.post("/v1/messages", json=req, headers={"x-api-key": "mk", "anthropic-version": "2023-06-01"})
+    assert r.status_code == 200
+    assert seen["authorization"] == "Bearer sk-ant-oat01-EXAMPLE" and seen["x-api-key"] is None
